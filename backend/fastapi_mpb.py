@@ -3,7 +3,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 import numpy as np
 import meep as mp
-from meep import mpb
+import meep.mpb as mpb
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
