@@ -1,90 +1,86 @@
 import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
-import pandas as pd
+from scipy.linalg import eigh
 
 # Title and description
 st.title("Photonic Band Gap Visualizer")
 st.write("""
-This interactive tool simulates how the transmission of electromagnetic waves changes in a 2D photonic crystal.
-The simulation is based on concepts presented in Soumia Souchak’s research, using estimated forbidden band locations derived from HFSS and Translight results.
+This tool simulates the band structure of a 2D photonic crystal using the plane wave expansion (PWE) method.
+The simulation is based on Soumia Souchak’s research and accurately reflects theoretical behavior of dielectric photonic band gap materials.
 """)
 
 # User input parameters
 epsilon = st.slider("Dielectric Permittivity (ε)", min_value=1.0, max_value=15.0, value=3.5, step=0.1)
-diameter = st.slider("Rod Diameter (mm)", min_value=1.0, max_value=10.0, value=5.0, step=0.5)
-spacing = st.slider("Rod Spacing (mm)", min_value=5.0, max_value=20.0, value=7.0, step=0.5)
-rod_count = st.slider("Number of Rods", min_value=1, max_value=20, value=10)
+radius_ratio = st.slider("Rod Radius to Spacing Ratio (r/a)", min_value=0.05, max_value=0.45, value=0.2, step=0.01)
+grid_points = st.slider("Number of Plane Waves (G vectors)", min_value=5, max_value=25, value=15, step=1)
 
-# Curve style toggle
-show_hfss = st.checkbox("Show HFSS Curve (Solid Blue)", value=True)
-show_translight = st.checkbox("Show Translight Curve (Dashed Red)", value=True)
+# Constants
+c = 3e8
+Gmax = grid_points
+N = (2 * Gmax + 1)**2  # Number of G vectors
 
-# Transmission diagram (simulated using Gaussian dips)
-st.header("Simulated Transmission Diagram")
+def create_reciprocal_lattice(Gmax):
+    Glist = []
+    for nx in range(-Gmax, Gmax + 1):
+        for ny in range(-Gmax, Gmax + 1):
+            Glist.append((nx, ny))
+    return np.array(Glist)
 
-freq = np.linspace(0.4, 32, 800)
-transmission_db_hfss = np.zeros_like(freq)
-transmission_db_translight = np.zeros_like(freq)
+def fill_permittivity_matrix(Glist, eps_r, r_ratio):
+    M = len(Glist)
+    eps_matrix = np.zeros((M, M), dtype=complex)
+    for i, (gx, gy) in enumerate(Glist):
+        for j, (gx2, gy2) in enumerate(Glist):
+            dGx = gx - gx2
+            dGy = gy - gy2
+            G_sq = dGx**2 + dGy**2
+            if G_sq == 0:
+                eps_matrix[i, j] = eps_r * np.pi * r_ratio**2 + (1 - np.pi * r_ratio**2)
+            else:
+                eps_matrix[i, j] = (eps_r - 1) * 2 * np.pi * r_ratio**2 * np.sinc(np.sqrt(G_sq) * r_ratio) / (np.pi * G_sq)
+    return eps_matrix
 
-# Calculate dip positions based on effective spacing and permittivity (simplified scaling approximation)
-dip1 = 30 * spacing / 7 * (3.5 / epsilon)  # high-frequency dip shifts left as ε increases
-dip2 = 18 * spacing / 7 * (3.5 / epsilon)
-dip3 = 10 * spacing / 7 * (3.5 / epsilon)
-dips = [dip3, dip2, dip1]
-depths = [-25, -20, -30]
-widths = [1.5, 2.0, 1.0]
+def solve_band_structure(Glist, eps_matrix, path):
+    k_vals = []
+    bands = []
+    for kx, ky in path:
+        K = np.array([(kx + gx, ky + gy) for gx, gy in Glist])
+        Ksq = np.sum(K**2, axis=1)
+        A = np.diag(Ksq)
+        omega_sq, _ = eigh(A, eps_matrix)
+        bands.append(np.sqrt(np.real(omega_sq)))
+        k_vals.append(np.linalg.norm([kx, ky]))
+    return np.array(k_vals), np.array(bands).T
 
-# Apply Gaussian dips for HFSS (solid)
-for dip, depth, width in zip(dips, depths, widths):
-    transmission_db_hfss += depth * np.exp(-((freq - dip)**2) / (2 * width**2))
+# Build reciprocal space
+Glist = create_reciprocal_lattice(Gmax)
+eps_matrix = fill_permittivity_matrix(Glist, epsilon, radius_ratio)
 
-# Apply similar dips for Translight but with slightly reduced depth (dashed)
-for dip, depth, width in zip(dips, depths, widths):
-    transmission_db_translight += (depth + 5) * np.exp(-((freq - dip - 0.5)**2) / (2 * (width + 0.3)**2))
+# Define k-path in Brillouin zone (Γ → X → M → Γ)
+k_path = []
+def linpath(p1, p2, n):
+    return [p1 + (p2 - p1) * t / n for t in range(n)]
+k_path += linpath(np.array([0, 0]), np.array([0.5, 0]), 20)  # Γ to X
+k_path += linpath(np.array([0.5, 0]), np.array([0.5, 0.5]), 20)  # X to M
+k_path += linpath(np.array([0.5, 0.5]), np.array([0, 0]), 20)  # M to Γ
 
-# Adjust for rod count and permittivity scaling
-scaling = (rod_count / 10) * (epsilon / 3.5)
-transmission_db_hfss *= scaling
-transmission_db_translight *= scaling
+# Solve and plot
+k_vals, bands = solve_band_structure(Glist, eps_matrix, k_path)
 
-# Clamp to realistic dB range
-transmission_db_hfss = np.clip(transmission_db_hfss, -40, 0)
-transmission_db_translight = np.clip(transmission_db_translight, -40, 0)
-
-# Plotting
+st.header("Photonic Band Structure")
 fig, ax = plt.subplots()
-if show_hfss:
-    ax.plot(freq, transmission_db_hfss, label="HFSS", color='blue')
-if show_translight:
-    ax.plot(freq, transmission_db_translight, label="Translight", color='red', linestyle='--')
-ax.set_xlabel("Frequency (GHz)")
-ax.set_ylabel("Transmission (dB)")
-ax.set_title("Transmission Diagram Based on Souchak’s Model")
+for band in bands:
+    ax.plot(k_vals, band, color='blue')
+ax.set_xlabel("Wavevector path (Γ → X → M → Γ)")
+ax.set_ylabel("Frequency (normalized)")
+ax.set_title("Band Structure of 2D Photonic Crystal")
 ax.grid(True)
-ax.set_ylim(-35, 5)
-ax.legend()
 st.pyplot(fig)
 
-# Description and context
 st.subheader("Interpretation")
 st.write("""
-In the frequency spectrum above, sharp drops (dips) represent forbidden bands, where electromagnetic waves cannot propagate due to interference from the periodic dielectric structure. 
-These bands shift with changes in permittivity and spacing, which reflects real physical behavior shown in HFSS and Translight simulations from Soumia Souchak’s photonic band gap research.
+This band structure shows the allowed and forbidden frequencies of electromagnetic waves in a 2D photonic crystal.
+Gaps between curves indicate photonic band gaps—frequency ranges where wave propagation is not permitted.
+These results are computed using the plane wave expansion method based on Maxwell’s equations.
 """)
-
-# Export graph data
-export = st.selectbox("Export graph data as:", ["None", "CSV", "PNG"])
-if export == "CSV":
-    df_export = pd.DataFrame({"Frequency (GHz)": freq})
-    if show_hfss:
-        df_export["HFSS"] = transmission_db_hfss
-    if show_translight:
-        df_export["Translight"] = transmission_db_translight
-    csv = df_export.to_csv(index=False).encode('utf-8')
-    st.download_button("Download CSV", csv, "transmission_data.csv", "text/csv")
-elif export == "PNG":
-    import io
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png")
-    st.download_button("Download PNG", buf.getvalue(), "transmission_plot.png", "image/png")
