@@ -1,7 +1,7 @@
 # Photonic Band Gap Visualizer
 
 An interactive Streamlit web app for simulating and visualizing the behavior of 2D dielectric photonic band gap (PBG) materials.
-This tool allows users to adjust structural parameters—such as rod diameter, spacing, and permittivity—and view how those affect electromagnetic wave transmission.
+This tool allows users to adjust structural parameters—such as rod diameter, spacing, and permittivity—and view how those affect electromagnetic wave transmission
 
 ## Features
 - Adjustable permittivity, diameter, spacing, and rod count
