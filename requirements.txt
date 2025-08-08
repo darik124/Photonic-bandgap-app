@@ -1,5 +1,5 @@
-streamlit
-matplotlib
+fastapi
+uvicorn
 numpy
-requests
+meep
 
