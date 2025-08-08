@@ -61,3 +61,21 @@ def compute_bands(inp: BandInput):
         "num_bands": inp.num_bands,
         "frequencies": freqs.tolist()  # list of list [k_index][band]
     }
+# backend/Dockerfile
+FROM ubuntu:22.04
+
+# System deps for meep/mpb (abridged; exact list depends on platform)
+RUN apt-get update && apt-get install -y \
+    python3 python3-pip python3-dev git build-essential \
+    libfftw3-dev libhdf5-dev guile-3.0-dev liblapack-dev libblas-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Python deps
+RUN pip3 install fastapi uvicorn meep
+
+WORKDIR /app
+COPY main.py /app/
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+docker build -t mpb-api backend/
+docker run -p 8000:8000 mpb-api
