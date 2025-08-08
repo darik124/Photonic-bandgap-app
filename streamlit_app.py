@@ -49,8 +49,8 @@ transmission_db_hfss *= scaling
 transmission_db_translight *= scaling
 
 # Clamp to realistic dB range
-transmission_db_hfss = np.clip(transmission_db_hfss, -30, 0)
-transmission_db_translight = np.clip(transmission_db_translight, -30, 0)
+transmission_db_hfss = np.clip(transmission_db_hfss, -40, 0)
+transmission_db_translight = np.clip(transmission_db_translight, -40, 0)
 
 # Plotting
 fig, ax = plt.subplots()
