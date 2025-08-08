@@ -3,6 +3,8 @@ import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
 import requests
+import streamlit as st
+backend_url = st.secrets["BACKEND_URL"]
 
 API_URL = st.secrets.get("MPB_API_URL", "http://<YOUR-MPB-SERVER>:8000/bands")
 
@@ -42,3 +44,4 @@ if st.button("Compute"):
     ax.set_title("Band Structure (MPB)")
     ax.grid(True)
     st.pyplot(fig)
+    
