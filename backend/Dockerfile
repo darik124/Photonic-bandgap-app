@@ -1,17 +1,10 @@
-FROM ubuntu:22.04
+# Use conda-forge so meep + mpb (and native libs) install cleanly
+FROM condaforge/miniforge3
 
-# System deps (abridged; adjust as needed for your platform)
-RUN apt-get update && apt-get install -y \
-    python3 python3-pip python3-dev build-essential git \
-    libfftw3-dev libhdf5-dev guile-3.0-dev liblapack-dev libblas-dev \
-    && rm -rf /var/lib/apt/lists/*
+# Create an env with everything we need
+RUN mamba install -y python=3.10 meep mpb fastapi uvicorn numpy && mamba clean -afy
 
-# Python deps
 WORKDIR /app
-COPY requirements.txt /app/requirements.txt
-RUN pip3 install --no-cache-dir -r /app/requirements.txt
-
-# App
 COPY fastapi_mpb.py /app/fastapi_mpb.py
 
 EXPOSE 8000
