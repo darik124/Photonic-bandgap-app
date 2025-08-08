@@ -43,4 +43,6 @@ ax.set_xlabel("Frequency (GHz)")
 ax.set_ylabel("Transmission")
 ax.set_title("Simulated Transmission Spectrum")
 ax.grid(True)
+
+# Show the plot in Streamlit
 st.pyplot(fig)
