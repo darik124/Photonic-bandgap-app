@@ -81,3 +81,11 @@ def compute_bands(inp: BandInput):
         "k_path_labels": labels,
         "frequencies": np.asarray(freqs).tolist(),  # JSON serializable
     }
+    from fastapi.middleware.cors import CORSMiddleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # restrict to your Streamlit domain later
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
