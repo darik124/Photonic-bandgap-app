@@ -1,6 +1,6 @@
 FROM ubuntu:22.04
 
-# System deps (abridged; you may adjust for your platform)
+# System deps (abridged; adjust as needed for your platform)
 RUN apt-get update && apt-get install -y \
     python3 python3-pip python3-dev build-essential git \
     libfftw3-dev libhdf5-dev guile-3.0-dev liblapack-dev libblas-dev \
