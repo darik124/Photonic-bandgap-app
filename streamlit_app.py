@@ -10,17 +10,18 @@ API_URL = f"{BACKEND_URL}/bands" if BACKEND_URL else ""
 
 st.title("Photonic Band Gap Visualizer (MPB-backed)")
 
-epsilon = st.slider("Dielectric Permittivity (ε)", 1.0, 15.0, 3.5, 0.1)
-r_over_a = st.slider("Rod radius ratio r/a", 0.05, 0.45, 0.20, 0.01)
-num_bands = st.slider("Bands", 4, 16, 8, 1)
-resolution = st.slider("Resolution", 16, 64, 32, 4)
-lattice = st.selectbox("Lattice", ["square", "triangular"])
-kpts = st.slider("k-points per segment", 8, 40, 16, 2)
+# ---------- Infinite crystal (MPB) ----------
+epsilon = st.slider("Dielectric Permittivity (ε)", 1.0, 15.0, 3.5, 0.1, key="mpb_eps")
+r_over_a = st.slider("Rod radius ratio r/a", 0.05, 0.45, 0.20, 0.01, key="mpb_r_over_a")
+num_bands = st.slider("Bands", 4, 16, 8, 1, key="mpb_bands")
+resolution = st.slider("Resolution", 16, 64, 32, 4, key="mpb_res")
+lattice = st.selectbox("Lattice", ["square", "triangular"], key="mpb_lattice")
+kpts = st.slider("k-points per segment", 8, 40, 16, 2, key="mpb_kpts")
 
 if not API_URL:
-    st.warning("Set BACKEND_URL in secrets to your FastAPI server (e.g., https://your-domain:8000).")
+    st.warning("Set BACKEND_URL in secrets to your FastAPI server (e.g., http://localhost:8000).")
 else:
-    if st.button("Compute"):
+    if st.button("Compute bands", key="mpb_btn"):
         with st.spinner("Running MPB on backend…"):
             payload = {
                 "epsilon": epsilon,
@@ -47,43 +48,38 @@ else:
         ax.set_title("Band Structure (MPB)")
         ax.grid(True)
         st.pyplot(fig)
-import requests
-import matplotlib.pyplot as plt
-import numpy as np
-import streamlit as st
-
-# You already have: BACKEND_URL from secrets.toml
 
 st.markdown("---")
 st.header("Transmission (finite slab, Meep)")
 
+# ---------- Finite slab (Meep) ----------
 colA, colB = st.columns(2)
 
 with colA:
-    eps_tx = st.number_input("Dielectric Permittivity (ε)", 1.1, 30.0, 3.5, 0.1)
-    a_mm = st.slider("Lattice constant a (mm)", 3.0, 15.0, 7.0, 0.1)
-    r_over_a = st.slider("Rod radius ratio r/a", 0.02, 0.40, 0.16, 0.01)
+    eps_tx   = st.number_input("Dielectric Permittivity (ε)", 1.1, 30.0, 3.5, 0.1, key="tx_eps")
+    a_mm     = st.slider("Lattice constant a (mm)", 3.0, 15.0, 7.0, 0.1, key="tx_a_mm")
+    r_over_a2 = st.slider("Rod radius ratio r/a", 0.02, 0.40, 0.16, 0.01, key="tx_r_over_a")
 
 with colB:
-    nx = st.slider("Rods along x", 4, 20, 10, 1)
-    ny = st.slider("Rods along y", 4, 20, 8, 1)
-    lattice_tx = st.selectbox("Lattice", ["square", "triangular"], index=0)
+    nx = st.slider("Rods along x", 4, 20, 10, 1, key="tx_nx")
+    ny = st.slider("Rods along y", 4, 20, 8, 1, key="tx_ny")
+    lattice_tx = st.selectbox("Lattice", ["square", "triangular"], index=0, key="tx_lattice")
 
 colC, colD, colE = st.columns(3)
 with colC:
-    fmin = st.number_input("fmin (GHz)", 1.0, 60.0, 5.0, 0.5)
+    fmin = st.number_input("fmin (GHz)", 1.0, 60.0, 5.0, 0.5, key="tx_fmin")
 with colD:
-    fmax = st.number_input("fmax (GHz)", 1.0, 60.0, 35.0, 0.5)
+    fmax = st.number_input("fmax (GHz)", 1.0, 60.0, 35.0, 0.5, key="tx_fmax")
 with colE:
-    nfreq = st.slider("Points", 50, 600, 300, 10)
+    nfreq = st.slider("Points", 50, 600, 300, 10, key="tx_nfreq")
 
 res_tx = st.slider("Resolution (px per a)", 8, 64, 24, 1,
-                   help="Higher = more accurate but slower")
+                   help="Higher = more accurate but slower", key="tx_res")
 
-if st.button("Compute Transmission"):
+if st.button("Compute Transmission", key="tx_btn"):
     payload = {
         "epsilon": float(eps_tx),
-        "r_over_a": float(r_over_a),
+        "r_over_a": float(r_over_a2),
         "a_mm": float(a_mm),
         "nx": int(nx),
         "ny": int(ny),
