@@ -55,7 +55,7 @@ def compute_bands(inp: BandInput):
                         geometry=geometry,
                         resolution=inp.resolution,
                         default_material=mp.Medium(epsilon=1.0))
-    # Choose TM to match rods-in-air (Ez out of plane); use ms.run_te() for TE
+    # TM (Ez) matches dielectric rods in air
     ms.run_tm()
     freqs = ms.all_freqs  # shape: (num_k, num_bands)
 
