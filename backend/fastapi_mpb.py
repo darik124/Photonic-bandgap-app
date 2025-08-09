@@ -27,7 +27,7 @@ class BandInput(BaseModel):
 
 @app.post("/bands")
 def compute_bands(inp: BandInput):
-    # Lattice/k-path
+    # Lattice & k-path
     if inp.lattice == "square":
         geometry_lattice = mp.Lattice(size=mp.Vector3(1, 1))
         G = mp.Vector3(0, 0); X = mp.Vector3(0.5, 0); M = mp.Vector3(0.5, 0.5)
@@ -45,7 +45,7 @@ def compute_bands(inp: BandInput):
     else:
         return {"error": "unknown lattice"}
 
-    radius = inp.r_over_a * 0.5  # normalized with a = 1
+    radius = inp.r_over_a * 0.5  # normalized (a=1)
     geometry = [mp.Cylinder(radius=radius, height=mp.inf,
                             material=mp.Medium(epsilon=inp.epsilon))]
 
@@ -57,7 +57,7 @@ def compute_bands(inp: BandInput):
                         default_material=mp.Medium(epsilon=1.0))
     # TM (Ez) matches dielectric rods in air
     ms.run_tm()
-    freqs = ms.all_freqs  # shape: (num_k, num_bands)
+    freqs = ms.all_freqs  # shape (num_k, num_bands)
 
     return {"k_path_labels": labels, "frequencies": np.asarray(freqs).tolist()}
 
@@ -92,9 +92,8 @@ def transmission(inp: TxInput):
     fmin = _GHz_to_meep_freq(inp.fmin_GHz, a_m)
     fmax = _GHz_to_meep_freq(inp.fmax_GHz, a_m)
     fc = np.linspace(fmin, fmax, inp.nfreq)
-    df = fc[1] - fc[0]
 
-    # Lattice footprint (in a=1 units)
+    # Lattice footprint (in a=1)
     if inp.lattice == "triangular":
         height = np.sqrt(3)/2 * inp.ny
         basis = [mp.Vector3(0,0), mp.Vector3(0.5, np.sqrt(3)/2)]
@@ -122,56 +121,52 @@ def transmission(inp: TxInput):
     sy = height + 2*dpml
     cell = mp.Vector3(sx, sy, 0)
 
-    # Source (broadband Gaussian) at left
+    # Source (broadband) at left
     src_x = -0.5*sx + dpml + 0.5
-    src = [mp.Source(src=mp.GaussianSource(frequency=np.mean(fc), fwidth=0.8*(fmax - fmin)),
-                     component=mp.Ez,     # TM/Ez
+    src = [mp.Source(src=mp.GaussianSource(frequency=0.5*(fc[0]+fc[-1]),
+                                           fwidth=(fc[-1]-fc[0])),
+                     component=mp.Ez,
                      center=mp.Vector3(src_x, 0, 0),
                      size=mp.Vector3(0, sy-2*dpml, 0))]
 
+    # Flux planes
     refl_fr = mp.FluxRegion(center=mp.Vector3(src_x + 0.4, 0, 0),
                             size=mp.Vector3(0, sy-2*dpml, 0))
     tran_fr = mp.FluxRegion(center=mp.Vector3(0.5*sx - dpml - 0.5, 0, 0),
                             size=mp.Vector3(0, sy-2*dpml, 0))
 
-# ---- pick DFT monitor band correctly ----
-fcen   = 0.5 * (fc[0] + fc[-1])      # center of the band (Hz in Meep units)
-fwidth = (fc[-1] - fc[0])            # total width of the band
+    # DFT band selection (center & width)
+    fcen   = 0.5 * (fc[0] + fc[-1])
+    fwidth = (fc[-1] - fc[0])
 
-# With crystal
-sim = mp.Simulation(
-    cell_size=cell,
-    geometry=geometry,
-    boundary_layers=[mp.PML(dpml)],
-    sources=src,
-    resolution=inp.resolution,
-)
-tran = sim.add_flux(fcen, fwidth, inp.nfreq, tran_fr)          # CHANGED
-sim.add_flux(fcen, fwidth, inp.nfreq, refl_fr)                 # CHANGED (if you want R, keep this)
-sim.run(until=mp.stop_when_fields_decayed(50, mp.Ez, tran_fr.center, 1e-6))
-tran_spec = np.array(mp.get_fluxes(tran))
+    # With crystal
+    sim = mp.Simulation(cell_size=cell,
+                        geometry=geometry,
+                        boundary_layers=[mp.PML(dpml)],
+                        sources=src,
+                        resolution=inp.resolution)
+    tran = sim.add_flux(fcen, fwidth, inp.nfreq, tran_fr)
+    sim.add_flux(fcen, fwidth, inp.nfreq, refl_fr)  # optional: reflection
+    sim.run(until=mp.stop_when_fields_decayed(50, mp.Ez, tran_fr.center, 1e-6))
+    tran_spec = np.array(mp.get_fluxes(tran))
 
-# Reference (no crystal)
-sim.reset_meep()
-sim = mp.Simulation(
-    cell_size=cell,
-    boundary_layers=[mp.PML(dpml)],
-    sources=src,
-    resolution=inp.resolution,
-)
-tran0 = sim.add_flux(fcen, fwidth, inp.nfreq, tran_fr)         # CHANGED
-sim.run(until=mp.stop_when_fields_decayed(50, mp.Ez, tran_fr.center, 1e-6))
-tran0_spec = np.array(mp.get_fluxes(tran0))
+    # Reference (no crystal)
+    sim.reset_meep()
+    sim = mp.Simulation(cell_size=cell,
+                        boundary_layers=[mp.PML(dpml)],
+                        sources=src,
+                        resolution=inp.resolution)
+    tran0 = sim.add_flux(fcen, fwidth, inp.nfreq, tran_fr)
+    sim.run(until=mp.stop_when_fields_decayed(50, mp.Ez, tran_fr.center, 1e-6))
+    tran0_spec = np.array(mp.get_fluxes(tran0))
 
-# Transmission (ratio)
-T = tran_spec / (tran0_spec + 1e-12)
-freq_GHz = np.linspace(inp.fmin_GHz, inp.fmax_GHz, inp.nfreq)
-TdB = 10 * np.log10(np.clip(T, 1e-12, None))
+    # Transmission ratio
+    T = tran_spec / (tran0_spec + 1e-12)
+    freq_GHz = np.linspace(inp.fmin_GHz, inp.fmax_GHz, inp.nfreq)
+    TdB = 10*np.log10(np.clip(T, 1e-12, None))
 
-return {
-    "frequency_GHz": freq_GHz.tolist(),
-    "transmission_dB": TdB.tolist(),
-}
+    return {"frequency_GHz": freq_GHz.tolist(),
+            "transmission_dB": TdB.tolist()}
 
 @app.get("/health")
 def health():
