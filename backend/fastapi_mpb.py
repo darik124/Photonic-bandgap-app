@@ -134,33 +134,44 @@ def transmission(inp: TxInput):
     tran_fr = mp.FluxRegion(center=mp.Vector3(0.5*sx - dpml - 0.5, 0, 0),
                             size=mp.Vector3(0, sy-2*dpml, 0))
 
-    # With crystal
-    sim = mp.Simulation(cell_size=cell,
-                        geometry=geometry,
-                        boundary_layers=[mp.PML(dpml)],
-                        sources=src,
-                        resolution=inp.resolution)
-    tran = sim.add_flux(fc[0], df, inp.nfreq, tran_fr)
-    sim.add_flux(fc[0], df, inp.nfreq, refl_fr)
-    sim.run(until=mp.stop_when_fields_decayed(50, mp.Ez, tran_fr.center, 1e-6))
-    tran_spec = np.array(mp.get_fluxes(tran))
+# ---- pick DFT monitor band correctly ----
+fcen   = 0.5 * (fc[0] + fc[-1])      # center of the band (Hz in Meep units)
+fwidth = (fc[-1] - fc[0])            # total width of the band
 
-    # Reference (no crystal)
-    sim.reset_meep()
-    sim = mp.Simulation(cell_size=cell,
-                        boundary_layers=[mp.PML(dpml)],
-                        sources=src,
-                        resolution=inp.resolution)
-    tran0 = sim.add_flux(fc[0], df, inp.nfreq, tran_fr)
-    sim.run(until=mp.stop_when_fields_decayed(50, mp.Ez, tran_fr.center, 1e-6))
-    tran0_spec = np.array(mp.get_fluxes(tran0))
+# With crystal
+sim = mp.Simulation(
+    cell_size=cell,
+    geometry=geometry,
+    boundary_layers=[mp.PML(dpml)],
+    sources=src,
+    resolution=inp.resolution,
+)
+tran = sim.add_flux(fcen, fwidth, inp.nfreq, tran_fr)          # CHANGED
+sim.add_flux(fcen, fwidth, inp.nfreq, refl_fr)                 # CHANGED (if you want R, keep this)
+sim.run(until=mp.stop_when_fields_decayed(50, mp.Ez, tran_fr.center, 1e-6))
+tran_spec = np.array(mp.get_fluxes(tran))
 
-    T = tran_spec / (tran0_spec + 1e-12)
-    freq_GHz = np.linspace(inp.fmin_GHz, inp.fmax_GHz, inp.nfreq)
-    TdB = 10*np.log10(np.clip(T, 1e-12, 1.0))
+# Reference (no crystal)
+sim.reset_meep()
+sim = mp.Simulation(
+    cell_size=cell,
+    boundary_layers=[mp.PML(dpml)],
+    sources=src,
+    resolution=inp.resolution,
+)
+tran0 = sim.add_flux(fcen, fwidth, inp.nfreq, tran_fr)         # CHANGED
+sim.run(until=mp.stop_when_fields_decayed(50, mp.Ez, tran_fr.center, 1e-6))
+tran0_spec = np.array(mp.get_fluxes(tran0))
 
-    return {"frequency_GHz": freq_GHz.tolist(),
-            "transmission_dB": TdB.tolist()}
+# Transmission (ratio)
+T = tran_spec / (tran0_spec + 1e-12)
+freq_GHz = np.linspace(inp.fmin_GHz, inp.fmax_GHz, inp.nfreq)
+TdB = 10 * np.log10(np.clip(T, 1e-12, None))
+
+return {
+    "frequency_GHz": freq_GHz.tolist(),
+    "transmission_dB": TdB.tolist(),
+}
 
 @app.get("/health")
 def health():
