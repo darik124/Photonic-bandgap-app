@@ -1,8 +1,7 @@
-# Use conda-forge so meep + mpb (and native libs) install cleanly
 FROM condaforge/miniforge3
 
-# Create an env with everything we need
-RUN mamba install -y python=3.10 meep mpb fastapi uvicorn numpy && mamba clean -afy
+# Use pymeep (Python bindings) + mpb, all from conda-forge
+RUN mamba install -y -c conda-forge python=3.10 pymeep mpb fastapi uvicorn numpy && mamba clean -afy
 
 WORKDIR /app
 COPY fastapi_mpb.py /app/fastapi_mpb.py
