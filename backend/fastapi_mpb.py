@@ -15,6 +15,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ---------- Infinite crystal (MPB band structure) ----------
+
 class BandInput(BaseModel):
     epsilon: float
     r_over_a: float
@@ -25,14 +27,15 @@ class BandInput(BaseModel):
 
 @app.post("/bands")
 def compute_bands(inp: BandInput):
+    # Lattice/k-path
     if inp.lattice == "square":
         geometry_lattice = mp.Lattice(size=mp.Vector3(1, 1))
         G = mp.Vector3(0, 0); X = mp.Vector3(0.5, 0); M = mp.Vector3(0.5, 0.5)
         k_points = mp.interpolate(inp.k_points_per_segment, [G, X, M, G])
         labels = ["Γ", "X", "M", "Γ"]
     elif inp.lattice == "triangular":
-        geometry_lattice = mp.Lattice(size=mp.Vector3(1,1),
-                                      basis1=mp.Vector3(1,0),
+        geometry_lattice = mp.Lattice(size=mp.Vector3(1, 1),
+                                      basis1=mp.Vector3(1, 0),
                                       basis2=mp.Vector3(0.5, np.sqrt(3)/2))
         G = mp.Vector3()
         M = mp.Vector3(0.5, 0.5/np.sqrt(3))
@@ -42,7 +45,7 @@ def compute_bands(inp: BandInput):
     else:
         return {"error": "unknown lattice"}
 
-    radius = inp.r_over_a * 0.5  # normalized a=1
+    radius = inp.r_over_a * 0.5  # normalized with a = 1
     geometry = [mp.Cylinder(radius=radius, height=mp.inf,
                             material=mp.Medium(epsilon=inp.epsilon))]
 
@@ -52,11 +55,16 @@ def compute_bands(inp: BandInput):
                         geometry=geometry,
                         resolution=inp.resolution,
                         default_material=mp.Medium(epsilon=1.0))
-    ms.run_tm()  # use ms.run_te() for TE
-    freqs = ms.all_freqs  # (num_k, num_bands)
+    # Choose TM to match rods-in-air (Ez out of plane); use ms.run_te() for TE
+    ms.run_tm()
+    freqs = ms.all_freqs  # shape: (num_k, num_bands)
 
     return {"k_path_labels": labels, "frequencies": np.asarray(freqs).tolist()}
-    class TxInput(BaseModel):
+
+
+# ---------- Finite crystal (Meep transmission) ----------
+
+class TxInput(BaseModel):
     epsilon: float          # rod permittivity
     r_over_a: float         # radius / lattice constant
     a_mm: float             # lattice constant in mm (sets GHz scale)
@@ -66,12 +74,12 @@ def compute_bands(inp: BandInput):
     resolution: int = 24    # Meep pixels per 'a'
     fmin_GHz: float = 5.0
     fmax_GHz: float = 35.0
-    nfreq: int = 300        # spectrum points
+    nfreq: int = 300        # spectrum samples
 
-def _a_from_mm(a_mm):
+def _a_from_mm(a_mm: float) -> float:
     return a_mm * 1e-3   # meters
 
-def _GHz_to_meep_freq(f_GHz, a_m):
+def _GHz_to_meep_freq(f_GHz: float, a_m: float) -> float:
     c0 = 299_792_458.0
     f_Hz = f_GHz * 1e9
     return (a_m * f_Hz) / c0  # dimensionless a/λ
@@ -86,7 +94,7 @@ def transmission(inp: TxInput):
     fc = np.linspace(fmin, fmax, inp.nfreq)
     df = fc[1] - fc[0]
 
-    # Lattice footprint (units of a=1 in simulation)
+    # Lattice footprint (in a=1 units)
     if inp.lattice == "triangular":
         height = np.sqrt(3)/2 * inp.ny
         basis = [mp.Vector3(0,0), mp.Vector3(0.5, np.sqrt(3)/2)]
@@ -94,10 +102,9 @@ def transmission(inp: TxInput):
         height = inp.ny
         basis = [mp.Vector3(0,0)]
 
-    # Rod geometry (2D, TE Ez)
+    # Rod geometry (2D, TM/Ez)
     r = inp.r_over_a * 0.5
-    index = np.sqrt(inp.epsilon)
-    mat = mp.Medium(index=index)
+    mat = mp.Medium(epsilon=inp.epsilon)
     geometry = []
     for ix in range(inp.nx):
         for iy in range(inp.ny):
@@ -117,12 +124,12 @@ def transmission(inp: TxInput):
 
     # Source (broadband Gaussian) at left
     src_x = -0.5*sx + dpml + 0.5
-    src = [mp.Source(src=mp.GaussianSource(frequency=np.mean(fc), fwidth=0.8*(fmax-fmin)),
-                     component=mp.Ez,
+    src = [mp.Source(src=mp.GaussianSource(frequency=np.mean(fc), fwidth=0.8*(fmax - fmin)),
+                     component=mp.Ez,     # TM/Ez
                      center=mp.Vector3(src_x, 0, 0),
                      size=mp.Vector3(0, sy-2*dpml, 0))]
 
-    refl_fr = mp.FluxRegion(center=mp.Vector3(src_x+0.4, 0, 0),
+    refl_fr = mp.FluxRegion(center=mp.Vector3(src_x + 0.4, 0, 0),
                             size=mp.Vector3(0, sy-2*dpml, 0))
     tran_fr = mp.FluxRegion(center=mp.Vector3(0.5*sx - dpml - 0.5, 0, 0),
                             size=mp.Vector3(0, sy-2*dpml, 0))
@@ -133,8 +140,8 @@ def transmission(inp: TxInput):
                         boundary_layers=[mp.PML(dpml)],
                         sources=src,
                         resolution=inp.resolution)
-    refl = sim.add_flux(fc[0], df, inp.nfreq, refl_fr)
     tran = sim.add_flux(fc[0], df, inp.nfreq, tran_fr)
+    sim.add_flux(fc[0], df, inp.nfreq, refl_fr)
     sim.run(until=mp.stop_when_fields_decayed(50, mp.Ez, tran_fr.center, 1e-6))
     tran_spec = np.array(mp.get_fluxes(tran))
 
@@ -144,7 +151,6 @@ def transmission(inp: TxInput):
                         boundary_layers=[mp.PML(dpml)],
                         sources=src,
                         resolution=inp.resolution)
-    refl0 = sim.add_flux(fc[0], df, inp.nfreq, refl_fr)
     tran0 = sim.add_flux(fc[0], df, inp.nfreq, tran_fr)
     sim.run(until=mp.stop_when_fields_decayed(50, mp.Ez, tran_fr.center, 1e-6))
     tran0_spec = np.array(mp.get_fluxes(tran0))
@@ -153,7 +159,9 @@ def transmission(inp: TxInput):
     freq_GHz = np.linspace(inp.fmin_GHz, inp.fmax_GHz, inp.nfreq)
     TdB = 10*np.log10(np.clip(T, 1e-12, 1.0))
 
-    return {
-        "frequency_GHz": freq_GHz.tolist(),
-        "transmission_dB": TdB.tolist()
-    }
+    return {"frequency_GHz": freq_GHz.tolist(),
+            "transmission_dB": TdB.tolist()}
+
+@app.get("/health")
+def health():
+    return {"ok": True}
