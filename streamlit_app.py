@@ -101,3 +101,55 @@ if st.button("Compute Transmission", key="tx_btn"):
     ax.set_title("Transmission Diagram (finite slab)")
     ax.grid(True)
     st.pyplot(fig)
+    st.markdown("---")
+st.header("Attenuation in Forbidden Band (Transmission vs Layers)")
+
+col1, col2, col3 = st.columns(3)
+with col1:
+    att_eps = st.number_input("Dielectric Permittivity (ε)", 1.1, 30.0, 3.5, 0.1, key="att_eps")
+with col2:
+    att_a = st.slider("Lattice constant a (mm)", 3.0, 15.0, 7.0, 0.1, key="att_a")
+with col3:
+    att_r = st.slider("Rod radius ratio r/a", 0.02, 0.40, 0.16, 0.01, key="att_r")
+
+col4, col5, col6 = st.columns(3)
+with col4:
+    att_ny = st.slider("Rods along y", 2, 30, 8, 1, key="att_ny")
+with col5:
+    att_nmax = st.slider("Max layers along x", 1, 30, 10, 1, key="att_nmax")
+with col6:
+    att_f0 = st.number_input("Probe frequency f0 (GHz)", 0.1, 100.0, 15.0, 0.1, key="att_f0")
+
+att_res = st.slider("Resolution (px per a)", 8, 64, 24, 1, key="att_res")
+att_lat = st.selectbox("Lattice", ["square", "triangular"], index=0, key="att_lat")
+
+if st.button("Compute Attenuation", key="att_btn"):
+    if not BACKEND_URL:
+        st.warning('Set BACKEND_URL in secrets to your FastAPI server (e.g., "http://localhost:8000").')
+    else:
+        payload = {
+            "epsilon": float(att_eps),
+            "r_over_a": float(att_r),
+            "a_mm": float(att_a),
+            "ny": int(att_ny),
+            "nmax": int(att_nmax),
+            "f0_GHz": float(att_f0),
+            "lattice": att_lat,
+            "resolution": int(att_res),
+        }
+        with st.spinner("Running attenuation sweep (Meep)…"):
+            r = requests.post(f"{BACKEND_URL}/attenuation", json=payload, timeout=900)
+            r.raise_for_status()
+            data = r.json()
+
+        layers = data["layers"]
+        TdB = data["T_dB"]
+
+        fig, ax = plt.subplots()
+        ax.plot(layers, TdB, marker="o")
+        ax.set_xlabel("Number of layers")
+        ax.set_ylabel("Transmission (dB)")
+        ax.set_title("Transmission vs Layers (at f0)")
+        ax.grid(True, linestyle="--", alpha=0.5)
+        st.pyplot(fig)
+
