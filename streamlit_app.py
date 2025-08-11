@@ -113,6 +113,8 @@ if st.button("Compute Transmission", key="tx_btn"):
     ax.set_title("Transmission Diagram (finite slab)")
     ax.grid(True)
     st.pyplot(fig)
+    except Exception as e:
+        st.error(f"Transmission error: {e}")
     st.markdown("---")
 st.header("Attenuation in Forbidden Band (Transmission vs Layers)")
 
@@ -137,7 +139,7 @@ att_lat = st.selectbox("Lattice", ["square", "triangular"], index=0, key="att_la
 
 if st.button("Compute Attenuation", key="att_btn"):
     if not BACKEND_URL:
-        st.warning('Set BACKEND_URL in secrets to your FastAPI server (e.g., "http://localhost:8000").')
+        st.warning('Set BACKEND_URL in .streamlit/secrets.toml (e.g., "http://localhost:8000").')
     else:
         payload = {
             "epsilon": float(att_eps),
@@ -149,19 +151,23 @@ if st.button("Compute Attenuation", key="att_btn"):
             "lattice": att_lat,
             "resolution": int(att_res),
         }
-        with st.spinner("Running attenuation sweep (Meep)…"):
-            r = requests.post(f"{BACKEND_URL}/attenuation", json=payload, timeout=900)
-            r.raise_for_status()
-            data = r.json()
+        try:
+            with st.spinner("Running attenuation sweep (Meep)…"):
+                r = requests.post(f"{BACKEND_URL}/attenuation", json=payload, timeout=900)
+                r.raise_for_status()
+                data = r.json()
 
-        layers = data["layers"]
-        TdB = data["T_dB"]
+            layers = data["layers"]
+            TdB = data["T_dB"]
 
-        fig, ax = plt.subplots()
-        ax.plot(layers, TdB, marker="o")
-        ax.set_xlabel("Number of layers")
-        ax.set_ylabel("Transmission (dB)")
-        ax.set_title("Transmission vs Layers (at f0)")
-        ax.grid(True, linestyle="--", alpha=0.5)
-        st.pyplot(fig)
+            fig, ax = plt.subplots()
+            ax.plot(layers, TdB, marker="o")
+            ax.set_xlabel("Number of layers")
+            ax.set_ylabel("Transmission (dB)")
+            ax.set_title("Transmission vs Layers (at f0)")
+            ax.grid(True, linestyle="--", alpha=0.5)
+            st.pyplot(fig)
+        except Exception as e:
+            st.error(f"Attenuation error: {e}")
+
 
