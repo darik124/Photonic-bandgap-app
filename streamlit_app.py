@@ -2,6 +2,14 @@ import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
 import requests
+def backend_ok(url: str) -> bool:
+    if not url:
+        return False
+    try:
+        r = requests.get(f"{url}/health", timeout=5)
+        return r.ok
+    except Exception:
+        return False
 
 # Read your backend URL from secrets (set this in Streamlit Cloud → Settings → Secrets)
 # For local testing, secrets.toml can contain: BACKEND_URL = "http://localhost:8000"
