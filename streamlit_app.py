@@ -30,6 +30,7 @@ if not API_URL:
     st.warning("Set BACKEND_URL in secrets to your FastAPI server (e.g., http://localhost:8000).")
 else:
     if st.button("Compute bands", key="mpb_btn"):
+    try:
         with st.spinner("Running MPB on backend…"):
             payload = {
                 "epsilon": epsilon,
@@ -37,7 +38,7 @@ else:
                 "num_bands": num_bands,
                 "resolution": resolution,
                 "k_points_per_segment": kpts,
-                "lattice": lattice
+                "lattice": lattice,
             }
             resp = requests.post(API_URL, json=payload, timeout=180)
             resp.raise_for_status()
@@ -49,13 +50,16 @@ else:
         fig, ax = plt.subplots()
         for b in range(nb):
             ax.plot(range(k_count), freqs[:, b], lw=1)
-        ticks = [0, k_count//3, 2*k_count//3, k_count-1]
+        ticks = [0, k_count // 3, 2 * k_count // 3, k_count - 1]
         ax.set_xticks(ticks)
         ax.set_xticklabels(data["k_path_labels"])
         ax.set_ylabel("Normalized frequency (ωa/2πc)")
         ax.set_title("Band Structure (MPB)")
         ax.grid(True)
         st.pyplot(fig)
+    except Exception as e:
+        st.error(f"Bands error: {e}")
+
 
 st.markdown("---")
 st.header("Transmission (finite slab, Meep)")
