@@ -171,3 +171,97 @@ def transmission(inp: TxInput):
 @app.get("/health")
 def health():
     return {"ok": True}
+class AttenuationInput(BaseModel):
+    epsilon: float          # rod permittivity
+    r_over_a: float         # radius / lattice constant
+    a_mm: float             # lattice constant (mm)
+    ny: int                 # rods along y (height)
+    nmax: int               # max layers along x to test
+    f0_GHz: float           # single probe frequency (GHz)
+    lattice: str = "square" # "square" | "triangular"
+    resolution: int = 24    # px per a
+    @app.post("/attenuation")
+def attenuation(inp: AttenuationInput):
+    import meep as mp
+    import numpy as np
+
+    # --- helpers reused from your file ---
+    a_m = _a_from_mm(inp.a_mm)
+    def GHz_to_meep(f_GHz: float) -> float:
+        return _GHz_to_meep_freq(f_GHz, a_m)
+
+    f0 = GHz_to_meep(inp.f0_GHz)
+    df = 1e-6  # razor-thin bandwidth around f0
+
+    # --- geometry builder for N layers along x ---
+    def build_geometry(nx_layers: int):
+        geometry = []
+        if inp.lattice == "triangular":
+            dy = np.sqrt(3) / 2
+            height = dy * inp.ny
+            basis = [mp.Vector3(0, 0), mp.Vector3(0.5, dy)]
+            for ix in range(nx_layers):
+                for iy in range(inp.ny):
+                    for b in basis:
+                        cx = ix + b.x - 0.5 * nx_layers + 0.5
+                        cy = (iy * dy) + b.y - 0.5 * height + dy/2
+                        geometry.append(mp.Cylinder(
+                            radius=inp.r_over_a * 0.5,  # keep consistent with your /transmission
+                            height=mp.inf,
+                            material=mp.Medium(epsilon=inp.epsilon),
+                            center=mp.Vector3(cx, cy)
+                        ))
+        else:
+            height = inp.ny
+            for ix in range(nx_layers):
+                for iy in range(inp.ny):
+                    cx = ix - 0.5 * nx_layers + 0.5
+                    cy = iy - 0.5 * height + 0.5
+                    geometry.append(mp.Cylinder(
+                        radius=inp.r_over_a * 0.5,      # consistent with /transmission
+                        height=mp.inf,
+                        material=mp.Medium(epsilon=inp.epsilon),
+                        center=mp.Vector3(cx, cy)
+                    ))
+        return geometry, height
+
+    # --- simulation runner for given N ---
+    def run_for_layers(nx_layers: int, ref_flux=None):
+        geometry, height = build_geometry(nx_layers)
+        dpml = 1.0
+        sx = nx_layers + 2*dpml + 2.0
+        sy = max(6.0, height + 2*dpml)
+        cell = mp.Vector3(sx, sy, 0)
+
+        src_x = -0.5*sx + dpml + 0.5
+        src = [mp.Source(mp.ContinuousSource(frequency=f0),
+                         component=mp.Ez,
+                         center=mp.Vector3(src_x, 0),
+                         size=mp.Vector3(0, sy - 2*dpml))]
+
+        tran_fr = mp.FluxRegion(center=mp.Vector3(+0.5*sx - dpml - 0.5, 0),
+                                size=mp.Vector3(0, sy - 2*dpml))
+        sim = mp.Simulation(cell_size=cell,
+                            geometry=geometry,
+                            boundary_layers=[mp.PML(dpml, direction=mp.X)],
+                            sources=src,
+                            resolution=inp.resolution)
+        fobj = sim.add_flux(f0, df, 1, tran_fr)
+
+        # fixed-time run to reach steady state for the continuous source
+        sim.run(until=200)
+        phi = mp.get_fluxes(fobj)[0]
+        if ref_flux is None:
+            return phi
+        return phi / (ref_flux + 1e-12)
+
+    # --- reference (no crystal), then sweep N=1..nmax ---
+    ref = run_for_layers(0, ref_flux=None)
+    layers, TdB = [], []
+    for N in range(1, inp.nmax + 1):
+        T = run_for_layers(N, ref_flux=ref)
+        TdB.append(10 * np.log10(max(T, 1e-12)))
+        layers.append(N)
+
+    return {"layers": layers, "T_dB": TdB}
+
