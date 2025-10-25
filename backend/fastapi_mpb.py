@@ -1,7 +1,8 @@
 # backend/fastapi_mpb.py
 from fastapi import FastAPI
-from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import List
 import numpy as np
 import meep as mp
 import meep.mpb as mpb
@@ -9,16 +10,33 @@ import meep.mpb as mpb
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],      # tighten later if you want
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# --------- quick health check ----------
+# ---------- health ----------
 @app.get("/health")
 def health():
     return {"ok": True}
+
+# ---------- helpers ----------
+C0 = 299_792_458.0
+
+def _a_from_mm(a_mm: float) -> float:
+    return a_mm * 1e-3  # meters
+
+def _GHz_to_meep(f_GHz: float, a_m: float) -> float:
+    f_Hz = f_GHz * 1e9
+    return (a_m * f_Hz) / C0  # dimensionless f = a/λ
+
+def _mse_against_reference(ref_xy: np.ndarray, sim_f: np.ndarray, sim_db: np.ndarray) -> float:
+    sim_interp = np.interp(ref_xy[:, 0], sim_f, sim_db, left=np.nan, right=np.nan)
+    m = ~np.isnan(sim_interp)
+    if np.count_nonzero(m) < max(10, int(0.2 * len(ref_xy))):
+        return np.inf
+    return float(np.mean((sim_interp[m] - ref_xy[:, 1][m]) ** 2))
 
 # ==========================================================
 # 1) Infinite crystal (MPB band structure)
@@ -29,11 +47,10 @@ class BandInput(BaseModel):
     num_bands: int = 8
     resolution: int = 32
     k_points_per_segment: int = 16
-    lattice: str = "square"   # "square" | "triangular"
+    lattice: str = "square"  # "square" | "triangular"
 
 @app.post("/bands")
 def compute_bands(inp: BandInput):
-    # Lattice & k-path
     if inp.lattice == "square":
         geometry_lattice = mp.Lattice(size=mp.Vector3(1, 1))
         G = mp.Vector3(0, 0); X = mp.Vector3(0.5, 0); M = mp.Vector3(0.5, 0.5)
@@ -43,24 +60,18 @@ def compute_bands(inp: BandInput):
         geometry_lattice = mp.Lattice(
             size=mp.Vector3(1, 1),
             basis1=mp.Vector3(1, 0),
-            basis2=mp.Vector3(0.5, np.sqrt(3) / 2),
+            basis2=mp.Vector3(0.5, np.sqrt(3)/2),
         )
         G = mp.Vector3()
-        M = mp.Vector3(0.5, 0.5 / np.sqrt(3))
-        K = mp.Vector3(1 / 3, 1 / (3 * np.sqrt(3)))
+        M = mp.Vector3(0.5, 0.5/np.sqrt(3))
+        K = mp.Vector3(1/3, 1/(3*np.sqrt(3)))
         k_points = mp.interpolate(inp.k_points_per_segment, [G, M, K, G])
         labels = ["Γ", "M", "K", "Γ"]
     else:
         return {"error": "unknown lattice"}
 
     radius = inp.r_over_a * 0.5  # normalized (a=1)
-    geometry = [
-        mp.Cylinder(
-            radius=radius,
-            height=mp.inf,
-            material=mp.Medium(epsilon=inp.epsilon),
-        )
-    ]
+    geometry = [mp.Cylinder(radius=radius, height=mp.inf, material=mp.Medium(epsilon=inp.epsilon))]
 
     ms = mpb.ModeSolver(
         num_bands=inp.num_bands,
@@ -70,224 +81,151 @@ def compute_bands(inp: BandInput):
         resolution=inp.resolution,
         default_material=mp.Medium(epsilon=1.0),
     )
-    # TM (Ez) for dielectric rods in air
-    ms.run_tm()
-    freqs = ms.all_freqs  # shape (num_k, num_bands)
-
-    return {"k_path_labels": labels, "frequencies": np.asarray(freqs).tolist()}
+    ms.run_tm()  # TM/Ez
+    freqs = np.asarray(ms.all_freqs).tolist()
+    return {"k_path_labels": labels, "frequencies": freqs}
 
 # ==========================================================
 # 2) Finite crystal (Meep transmission spectrum)
 # ==========================================================
 class TxInput(BaseModel):
-    epsilon: float          # rod permittivity
-    r_over_a: float         # radius / lattice constant
-    a_mm: float             # lattice constant in mm (sets GHz scale)
-    nx: int = 10            # rods along x (prop direction)
-    ny: int = 8             # rods along y (height)
-    lattice: str = "square" # or "triangular"
-    resolution: int = 24    # Meep pixels per 'a'
+    epsilon: float
+    r_over_a: float
+    a_mm: float
+    nx: int = 10
+    ny: int = 8
+    lattice: str = "square"
+    resolution: int = 24
     fmin_GHz: float = 5.0
     fmax_GHz: float = 35.0
-    nfreq: int = 300        # spectrum samples
+    nfreq: int = 300
 
-def _a_from_mm(a_mm: float) -> float:
-    return a_mm * 1e-3   # meters
+def run_transmission_simulation(
+    *, epsilon: float, r_over_a: float, a_mm: float,
+    nx: int, ny: int, lattice: str,
+    fmin: float, fmax: float, points: int, resolution: int
+):
+    """Return dict with freq_GHz[], Tlin[] (power) for a finite slab."""
+    a_m = _a_from_mm(a_mm)
+    fmin_mu = _GHz_to_meep(fmin, a_m)
+    fmax_mu = _GHz_to_meep(fmax, a_m)
+    fcen = 0.5 * (fmin_mu + fmax_mu)
+    fwidth = (fmax_mu - fmin_mu)
 
-def _GHz_to_meep_freq(f_GHz: float, a_m: float) -> float:
-    c0 = 299_792_458.0
-    f_Hz = f_GHz * 1e9
-    return (a_m * f_Hz) / c0  # dimensionless a/λ
-
-@app.post("/transmission")
-def transmission(inp: TxInput):
-    a_m = _a_from_mm(inp.a_mm)
-
-    # Frequency axis in Meep units
-    fmin = _GHz_to_meep_freq(inp.fmin_GHz, a_m)
-    fmax = _GHz_to_meep_freq(inp.fmax_GHz, a_m)
-    fc = np.linspace(fmin, fmax, inp.nfreq)
-
-    # Lattice footprint (in a=1)
-    if inp.lattice == "triangular":
-        height = np.sqrt(3) / 2 * inp.ny
-        basis = [mp.Vector3(0, 0), mp.Vector3(0.5, np.sqrt(3) / 2)]
+    # Build geometry in a-units (a=1)
+    r = r_over_a * 0.5
+    rods = []
+    if lattice == "triangular":
+        dy = np.sqrt(3)/2
+        height = dy * ny
+        basis = [mp.Vector3(0, 0), mp.Vector3(0.5, dy)]
+        for ix in range(nx):
+            for iy in range(ny):
+                for b in basis:
+                    rods.append(mp.Cylinder(radius=r, height=mp.inf,
+                                            material=mp.Medium(epsilon=epsilon),
+                                            center=mp.Vector3(ix + b.x, iy*dy + b.y)))
     else:
-        height = inp.ny
-        basis = [mp.Vector3(0, 0)]
+        height = ny
+        for ix in range(nx):
+            for iy in range(ny):
+                rods.append(mp.Cylinder(radius=r, height=mp.inf,
+                                        material=mp.Medium(epsilon=epsilon),
+                                        center=mp.Vector3(ix, iy)))
 
-    # Rod geometry (2D, TM/Ez)
-    r = inp.r_over_a * 0.5
-    mat = mp.Medium(epsilon=inp.epsilon)
-    geometry = []
-    for ix in range(inp.nx):
-        for iy in range(inp.ny):
-            for b in basis:
-                x = ix + b.x
-                y = (iy + b.y) if inp.lattice == "triangular" else iy
-                geometry.append(
-                    mp.Cylinder(
-                        radius=r, height=mp.inf, material=mat,
-                        center=mp.Vector3(x, y, 0)
-                    )
-                )
-
-    # Computational cell
+    # Cell and sources
     dpml = 1.0
-    sx = inp.nx + 2 * dpml + 2.0
-    sy = height + 2 * dpml
+    sx = nx + 2*dpml + 2.0
+    sy = max(6.0, height + 2*dpml)
     cell = mp.Vector3(sx, sy, 0)
+    src_x = -0.5*sx + dpml + 0.5
+    src = [mp.Source(src=mp.GaussianSource(frequency=fcen, fwidth=fwidth),
+                     component=mp.Ez,
+                     center=mp.Vector3(src_x, 0),
+                     size=mp.Vector3(0, sy - 2*dpml))]
 
-    # Source (broadband) at left
-    src_x = -0.5 * sx + dpml + 0.5
-    src = [
-        mp.Source(
-            src=mp.GaussianSource(frequency=0.5 * (fc[0] + fc[-1]),
-                                  fwidth=(fc[-1] - fc[0])),
-            component=mp.Ez,
-            center=mp.Vector3(src_x, 0, 0),
-            size=mp.Vector3(0, sy - 2 * dpml, 0),
-        )
-    ]
-
-    # Flux planes
-    refl_fr = mp.FluxRegion(center=mp.Vector3(src_x + 0.4, 0, 0),
-                            size=mp.Vector3(0, sy - 2 * dpml, 0))
-    tran_fr = mp.FluxRegion(center=mp.Vector3(0.5 * sx - dpml - 0.5, 0, 0),
-                            size=mp.Vector3(0, sy - 2 * dpml, 0))
-
-    # DFT band selection (center & width)
-    fcen   = 0.5 * (fc[0] + fc[-1])
-    fwidth = (fc[-1] - fc[0])
+    tran_fr = mp.FluxRegion(center=mp.Vector3(0.5*sx - dpml - 0.5, 0),
+                            size=mp.Vector3(0, sy - 2*dpml))
 
     # With crystal
-    sim = mp.Simulation(cell_size=cell,
-                        geometry=geometry,
-                        boundary_layers=[mp.PML(dpml)],
-                        sources=src,
-                        resolution=inp.resolution)
-    tran = sim.add_flux(fcen, fwidth, inp.nfreq, tran_fr)
-    sim.add_flux(fcen, fwidth, inp.nfreq, refl_fr)  # optional: reflection
+    sim = mp.Simulation(cell_size=cell, geometry=rods,
+                        boundary_layers=[mp.PML(dpml)], sources=src,
+                        resolution=resolution)
+    tran = sim.add_flux(fcen, fwidth, points, tran_fr)
     sim.run(until=mp.stop_when_fields_decayed(50, mp.Ez, tran_fr.center, 1e-6))
     tran_spec = np.array(mp.get_fluxes(tran))
 
     # Reference (no crystal)
     sim.reset_meep()
-    sim = mp.Simulation(cell_size=cell,
-                        boundary_layers=[mp.PML(dpml)],
-                        sources=src,
-                        resolution=inp.resolution)
-    tran0 = sim.add_flux(fcen, fwidth, inp.nfreq, tran_fr)
+    sim = mp.Simulation(cell_size=cell, boundary_layers=[mp.PML(dpml)],
+                        sources=src, resolution=resolution)
+    tran0 = sim.add_flux(fcen, fwidth, points, tran_fr)
     sim.run(until=mp.stop_when_fields_decayed(50, mp.Ez, tran_fr.center, 1e-6))
     tran0_spec = np.array(mp.get_fluxes(tran0))
 
-    # Transmission ratio
-    T = tran_spec / (tran0_spec + 1e-12)
-    freq_GHz = np.linspace(inp.fmin_GHz, inp.fmax_GHz, inp.nfreq)
-    TdB = 10 * np.log10(np.clip(T, 1e-12, None))
+    Tlin = tran_spec / (tran0_spec + 1e-12)  # power transmittance
+    freq_GHz = np.linspace(fmin, fmax, points)
+    return {"freq_GHz": freq_GHz, "Tlin": Tlin}
 
-    return {"frequency_GHz": freq_GHz.tolist(),
-            "transmission_dB": TdB.tolist()}
+@app.post("/transmission")
+def transmission(inp: TxInput):
+    sim = run_transmission_simulation(
+        epsilon=inp.epsilon, r_over_a=inp.r_over_a, a_mm=inp.a_mm,
+        nx=inp.nx, ny=inp.ny, lattice=inp.lattice,
+        fmin=inp.fmin_GHz, fmax=inp.fmax_GHz, points=inp.nfreq,
+        resolution=inp.resolution,
+    )
+    TdB = 10.0*np.log10(np.clip(sim["Tlin"], 1e-12, None))
+    return {"freq_GHz": sim["freq_GHz"].tolist(),
+            "trans_dB": TdB.tolist(),
+            "trans_lin": sim["Tlin"].tolist()}
 
 # ==========================================================
-# 3) Attenuation in forbidden band (Transmission vs layers)
+# 3) Calibration against reference data
 # ==========================================================
-class AttenuationInput(BaseModel):
-    epsilon: float          # rod permittivity
-    r_over_a: float         # radius / lattice constant
-    a_mm: float             # lattice constant (mm)
-    ny: int                 # rods along y (height)
-    nmax: int               # max layers along x to test
-    f0_GHz: float           # single probe frequency (GHz)
-    lattice: str = "square" # "square" | "triangular"
-    resolution: int = 24    # px per a
+class RefPoint(BaseModel):
+    freq_GHz: float
+    trans_dB: float  # power dB (10*log10(T))
 
-@app.post("/attenuation")
-def attenuation(inp: AttenuationInput):
-    # helpers
-    a_m = _a_from_mm(inp.a_mm)
-    def GHz_to_meep(f_GHz: float) -> float:
-        return _GHz_to_meep_freq(f_GHz, a_m)
+class CalibrateRequest(BaseModel):
+    epsilon: float = 3.50
+    r_over_a: float = 0.20
+    lattice: str = "square"
+    ny: int = 8
+    a_min_mm: float = 7.0
+    a_max_mm: float = 12.0
+    a_steps: int = 11
+    nx_min: int = 8
+    nx_max: int = 28
+    nx_step: int = 4
+    calib_resolution: int = 28
+    points: int = 400
+    reference: List[RefPoint]
 
-    f0 = GHz_to_meep(inp.f0_GHz)
-    df = 1e-6  # razor-thin around f0
+@app.post("/calibrate")
+def calibrate(req: CalibrateRequest):
+    ref = np.array([[p.freq_GHz, p.trans_dB] for p in req.reference], dtype=float)
+    fmin, fmax = float(np.min(ref[:, 0])), float(np.max(ref[:, 0]))
+    a_grid = np.linspace(req.a_min_mm, req.a_max_mm, req.a_steps)
+    nx_grid = list(range(req.nx_min, req.nx_max + 1, req.nx_step))
 
-    # geometry builder for N layers along x
-    def build_geometry(nx_layers: int):
-        geometry = []
-        if inp.lattice == "triangular":
-            dy = np.sqrt(3) / 2
-            height = dy * inp.ny
-            basis = [mp.Vector3(0, 0), mp.Vector3(0.5, dy)]
-            for ix in range(nx_layers):
-                for iy in range(inp.ny):
-                    for b in basis:
-                        cx = ix + b.x - 0.5 * nx_layers + 0.5
-                        cy = (iy * dy) + b.y - 0.5 * height + dy / 2
-                        geometry.append(
-                            mp.Cylinder(
-                                radius=inp.r_over_a * 0.5,
-                                height=mp.inf,
-                                material=mp.Medium(epsilon=inp.epsilon),
-                                center=mp.Vector3(cx, cy),
-                            )
-                        )
-        else:
-            height = inp.ny
-            for ix in range(nx_layers):
-                for iy in range(inp.ny):
-                    cx = ix - 0.5 * nx_layers + 0.5
-                    cy = iy - 0.5 * height + 0.5
-                    geometry.append(
-                        mp.Cylinder(
-                            radius=inp.r_over_a * 0.5,
-                            height=mp.inf,
-                            material=mp.Medium(epsilon=inp.epsilon),
-                            center=mp.Vector3(cx, cy),
-                        )
-                    )
-        return geometry, height
-
-    # simulation runner for given N
-    def run_for_layers(nx_layers: int, ref_flux=None):
-        geometry, height = build_geometry(nx_layers)
-        dpml = 1.0
-        sx = nx_layers + 2 * dpml + 2.0
-        sy = max(6.0, height + 2 * dpml)
-        cell = mp.Vector3(sx, sy, 0)
-
-        src_x = -0.5 * sx + dpml + 0.5
-        src = [
-            mp.Source(
-                mp.ContinuousSource(frequency=f0),
-                component=mp.Ez,
-                center=mp.Vector3(src_x, 0),
-                size=mp.Vector3(0, sy - 2 * dpml),
+    best = {"mse": float("inf")}
+    for a_mm in a_grid:
+        for nx in nx_grid:
+            sim = run_transmission_simulation(
+                epsilon=req.epsilon, r_over_a=req.r_over_a, a_mm=a_mm,
+                nx=nx, ny=req.ny, lattice=req.lattice,
+                fmin=fmin, fmax=fmax, points=req.points,
+                resolution=req.calib_resolution,
             )
-        ]
-
-        tran_fr = mp.FluxRegion(center=mp.Vector3(+0.5 * sx - dpml - 0.5, 0),
-                                size=mp.Vector3(0, sy - 2 * dpml))
-        sim = mp.Simulation(cell_size=cell,
-                            geometry=geometry,
-                            boundary_layers=[mp.PML(dpml, direction=mp.X)],
-                            sources=src,
-                            resolution=inp.resolution)
-        fobj = sim.add_flux(f0, df, 1, tran_fr)
-
-        # let the continuous source reach steady state
-        sim.run(until=200)
-        phi = mp.get_fluxes(fobj)[0]
-        if ref_flux is None:
-            return phi
-        return phi / (ref_flux + 1e-12)
-
-    # reference (no crystal), then sweep N=1..nmax
-    ref = run_for_layers(0, ref_flux=None)
-    layers, TdB = [], []
-    for N in range(1, inp.nmax + 1):
-        T = run_for_layers(N, ref_flux=ref)
-        TdB.append(10 * np.log10(max(T, 1e-12)))
-        layers.append(N)
-
-    return {"layers": layers, "T_dB": TdB}
+            Tdb = 10.0*np.log10(np.clip(sim["Tlin"], 1e-12, None))
+            mse = _mse_against_reference(ref, sim["freq_GHz"], Tdb)
+            if mse < best["mse"]:
+                best = {
+                    "mse": float(mse),
+                    "a_mm": float(a_mm),
+                    "nx": int(nx),
+                    "freq_GHz": sim["freq_GHz"].tolist(),
+                    "sim_dB": Tdb.tolist(),
+                }
+    return best
