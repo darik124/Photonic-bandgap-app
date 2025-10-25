@@ -229,3 +229,72 @@ def calibrate(req: CalibrateRequest):
                     "sim_dB": Tdb.tolist(),
                 }
     return best
+# ==========================================================
+# 4) Built-in "reference / measurement" curves (for overlay)
+#    A) /ref/list      -> list available built-ins
+#    B) /ref/get       -> fetch a named dataset
+#    C) /ref/generate  -> parametric "Soumia-style" curve with sliders
+# ==========================================================
+from typing import Optional
+
+# A very light ~Soumia Fig.3 estimate (1–30 GHz), digitized/parameterized
+def _Graph_Stimate(fmin=5.0, fmax=30.0, points=400):
+    f = np.linspace(fmin, fmax, points)
+    # Dip centered ~14.8 GHz, ~−12 dB depth, ~3.5 GHz width
+    fc, depth, width = 14.8, 12.0, 3.5
+    # smooth notch (Lorentzian-ish)
+    dip = -depth / (1.0 + ((f - fc) / (0.5 * width)) ** 2)
+
+    # right-side roll-off ~26–30 GHz down to ~−12 dB
+    roll_start, roll_slope = 26.0, -3.5  # dB per GHz after roll_start
+    roll = np.where(f > roll_start, (f - roll_start) * roll_slope, 0.0)
+
+    # suppress below ~9 GHz a bit (tiny wiggle)
+    left_wiggle = -0.6 * np.exp(-((f - 9.5) / 1.2) ** 2)
+
+    tr_db = np.maximum(dip + roll + left_wiggle, -25.0)
+    return f.tolist(), tr_db.tolist()
+
+@app.get("/ref/list")
+def ref_list():
+    return {"datasets": [
+        {"name": "Graph_Stimate", "desc": "Graph Stimate (1–30 GHz)"},
+        {"name": "flat_0dB", "desc": "Flat 0 dB reference (sanity)"},
+    ]}
+
+@app.get("/ref/get")
+def ref_get(name: str = "Graph_Stimate",
+            fmin: float = 5.0, fmax: float = 30.0, points: int = 400):
+    f = np.linspace(fmin, fmax, points)
+    if name == "Graph_Stimate":
+        freq, tr_db = _Graph_Stimate(fmin, fmax, points)
+    elif name == "flat_0dB":
+        freq, tr_db = f.tolist(), [0.0]*points
+    else:
+        return {"error": "unknown dataset"}
+    return {"name": name, "freq_GHz": freq, "trans_dB": tr_db}
+
+class RefGenParams(BaseModel):
+    fmin: float = 5.0
+    fmax: float = 30.0
+    points: int = 400
+    # Notch
+    fc_GHz: float = 14.8      # dip center
+    depth_dB: float = 12.0    # positive number -> depth
+    width_GHz: float = 3.5    # approximate FWHM
+    # Right roll-off
+    roll_start_GHz: float = 26.0
+    roll_slope_dB_per_GHz: float = -3.5
+    # Left wiggle (small)
+    left_mu_GHz: float = 9.5
+    left_sigma_GHz: float = 1.2
+    left_amp_dB: float = 0.6
+
+@app.post("/ref/generate")
+def ref_generate(p: RefGenParams):
+    f = np.linspace(p.fmin, p.fmax, p.points)
+    dip = -p.depth_dB / (1.0 + ((f - p.fc_GHz) / (0.5 * p.width_GHz)) ** 2)
+    roll = np.where(f > p.roll_start_GHz, (f - p.roll_start_GHz) * p.roll_slope_dB_per_GHz, 0.0)
+    left = -p.left_amp_dB * np.exp(-((f - p.left_mu_GHz) / p.left_sigma_GHz) ** 2)
+    tr_db = np.maximum(dip + roll + left, -25.0)
+    return {"freq_GHz": f.tolist(), "trans_dB": tr_db.tolist()}
