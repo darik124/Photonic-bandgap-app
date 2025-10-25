@@ -159,69 +159,94 @@ if st.session_state["tx_data"]:
     st.pyplot(fig)
 
 # =========================================================
-# 2b) Calibration to reference dataset (new)
+# 2b) Reference / measurement (built-in, slider-driven)
 # =========================================================
-st.subheader("Match to reference (experimental)")
+st.subheader("Reference / measurement (optional)")
 
-uploaded = st.file_uploader("Upload CSV with columns: freq_GHz, trans_dB", type=["csv"])
-if uploaded is not None:
-    df_ref = pd.read_csv(uploaded)
-    # sanitize
-    df_ref = df_ref.dropna()[["freq_GHz", "trans_dB"]].sort_values("freq_GHz")
-    st.caption(f"Loaded {len(df_ref)} reference points.")
-    st.line_chart(df_ref.set_index("freq_GHz"))
+ref_mode = st.radio("Choose a reference source", ["None", "Built-in (Soumia)", "Custom (parametric)"], horizontal=True)
 
-    with st.expander("Calibration search settings", expanded=False):
-        a_min = st.number_input("a_min (mm)", value=7.0)
-        a_max = st.number_input("a_max (mm)", value=12.0)
-        a_steps = st.number_input("a_steps", value=11, step=1)
-        nx_min = st.number_input("nx_min", value=8, step=1)
-        nx_max = st.number_input("nx_max", value=28, step=1)
-        nx_step = st.number_input("nx_step", value=4, step=1)
-        calib_res = st.number_input("calibration resolution (px per a)", value=28, step=2)
-        pts = st.number_input("points per sweep", value=400, step=100)
-        ny_cal = st.number_input("ny (rods along y)", value=8, step=1)
+# space to store/overlay
+if "calib_overlay" not in st.session_state:
+    st.session_state["calib_overlay"] = None
 
-    do_cal = st.button("Calibrate to dataset")
-    if do_cal:
-        if not API_CAL:
-            st.warning("Set BACKEND_URL in secrets (e.g., http://localhost:8000).")
-        else:
-            payload = {
-                "epsilon": float(eps_tx),
-                "r_over_a": float(r_over_a2),
-                "lattice": lattice_tx,
-                "ny": int(ny_cal),
-                "a_min_mm": float(a_min),
-                "a_max_mm": float(a_max),
-                "a_steps": int(a_steps),
-                "nx_min": int(nx_min),
-                "nx_max": int(nx_max),
-                "nx_step": int(nx_step),
-                "calib_resolution": int(calib_res),
-                "points": int(pts),
-                "reference": df_ref.to_dict(orient="records"),
-            }
+if ref_mode == "Built-in (Soumia)":
+    if not BACKEND_URL:
+        st.warning("Set BACKEND_URL to use built-ins.")
+    else:
+        cols = st.columns(3)
+        with cols[0]:
+            ref_fmin = st.number_input("fmin (GHz)", 1.0, 60.0, 5.0, 0.5, key="ref_fmin")
+        with cols[1]:
+            ref_fmax = st.number_input("fmax (GHz)", 1.0, 60.0, 30.0, 0.5, key="ref_fmax")
+        with cols[2]:
+            ref_pts = st.slider("Points", 50, 1200, 400, 50, key="ref_points")
+
+        if st.button("Load Soumia Fig.3 (built-in)"):
             try:
-                with st.spinner("Searching best a, nx to fit reference…"):
-                    r = requests.post(API_CAL, json=payload, timeout=1200)
-                    r.raise_for_status()
-                    res = r.json()
-                    st.success(f"Best fit: a = {res['a_mm']:.2f} mm, nx = {res['nx']}  (MSE = {res['mse']:.4f})")
-
-                    # overlay storage for the main plot
-                    sim_df = pd.DataFrame({"freq_GHz": res["freq_GHz"], "sim_dB": res["sim_dB"]})
-                    st.session_state["calib_overlay"] = {"ref_df": df_ref, "sim_df": sim_df}
-
-                    # optionally push into the sliders for a one-click re-run at high res
-                    st.session_state["tx_a_mm"] = float(res["a_mm"])
-                    st.session_state["tx_nx"] = int(res["nx"])
-
+                r = requests.get(f"{BACKEND_URL}/ref/get",
+                                 params={"name":"soumia_fig3_estimate","fmin":ref_fmin,"fmax":ref_fmax,"points":ref_pts},
+                                 timeout=30)
+                r.raise_for_status()
+                rd = r.json()
+                import pandas as pd
+                ref_df = pd.DataFrame({"freq_GHz": rd["freq_GHz"], "trans_dB": rd["trans_dB"]})
+                st.session_state["calib_overlay"] = {"ref_df": ref_df}
+                st.success("Loaded built-in reference. It will be overlaid on the Transmission plot.")
             except Exception as e:
-                st.error(f"Calibration error: {e}")
+                st.error(f"Reference error: {e}")
 
-st.markdown("---")
-st.header("Attenuation in Forbidden Band (Transmission vs Layers)")
+elif ref_mode == "Custom (parametric)":
+    cols = st.columns(3)
+    with cols[0]:
+        fc = st.number_input("Dip center fc (GHz)", 5.0, 40.0, 14.8, 0.1)
+        depth = st.number_input("Dip depth (dB)", 1.0, 30.0, 12.0, 0.5)
+        width = st.number_input("Dip width (GHz)", 0.5, 10.0, 3.5, 0.1)
+    with cols[1]:
+        roll_start = st.number_input("Right roll start (GHz)", 10.0, 40.0, 26.0, 0.1)
+        roll_slope = st.number_input("Right slope (dB/GHz, negative)", -10.0, 0.0, -3.5, 0.1)
+        pts = st.slider("Points", 50, 1200, 400, 50, key="ref_pts_custom")
+    with cols[2]:
+        fmin_ref = st.number_input("fmin (GHz)", 1.0, 60.0, 5.0, 0.5, key="ref_fmin_custom")
+        fmax_ref = st.number_input("fmax (GHz)", 1.0, 60.0, 30.0, 0.5, key="ref_fmax_custom")
+        left_mu = st.number_input("Left wiggle μ (GHz)", 5.0, 20.0, 9.5, 0.1)
+        left_sig = st.number_input("Left wiggle σ (GHz)", 0.2, 5.0, 1.2, 0.1)
+        left_amp = st.number_input("Left wiggle amp (dB)", 0.0, 5.0, 0.6, 0.1)
+
+    if st.button("Generate custom reference"):
+        try:
+            payload = {
+                "fmin": float(fmin_ref), "fmax": float(fmax_ref), "points": int(pts),
+                "fc_GHz": float(fc), "depth_dB": float(depth), "width_GHz": float(width),
+                "roll_start_GHz": float(roll_start), "roll_slope_dB_per_GHz": float(roll_slope),
+                "left_mu_GHz": float(left_mu), "left_sigma_GHz": float(left_sig), "left_amp_dB": float(left_amp),
+            }
+            r = requests.post(f"{BACKEND_URL}/ref/generate", json=payload, timeout=30)
+            r.raise_for_status()
+            rd = r.json()
+            import pandas as pd
+            ref_df = pd.DataFrame({"freq_GHz": rd["freq_GHz"], "trans_dB": rd["trans_dB"]})
+            st.session_state["calib_overlay"] = {"ref_df": ref_df}
+            st.success("Generated custom reference. It will be overlaid on the Transmission plot.")
+        except Exception as e:
+            st.error(f"Reference generation error: {e}")
+else:
+    st.session_state["calib_overlay"] = None
+# Render transmission plot if we have data
+if st.session_state["tx_data"]:
+    data = st.session_state["tx_data"]
+    fig, ax = plt.subplots()
+    ax.plot(data["freq_GHz"], data["trans_dB"], lw=1.5, label="Simulation (Meep)")
+    ax.set_xlabel("Frequency (GHz)")
+    ax.set_ylabel("Transmission (dB)")
+    ax.set_title("Transmission Diagram (finite slab)")
+    ax.grid(True, linestyle="--", alpha=0.4)
+
+    ov = st.session_state.get("calib_overlay")
+    if ov and "ref_df" in ov:
+        ax.plot(ov["ref_df"]["freq_GHz"], ov["ref_df"]["trans_dB"], alpha=0.9, label="Reference")
+        ax.legend()
+
+    st.pyplot(fig)
 
 # =========================================================
 # 3) Attenuation vs layers (Meep)
