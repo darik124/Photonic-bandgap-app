@@ -184,6 +184,35 @@ def _run_transmission(
     rods, height, yperiod = _build_rods_grid(
         r_over_a, epsilon, nx, ny, lattice, periodic_y=periodic_y
     )
+    # -------------------------
+# 2) Finite crystal (Meep transmission spectrum) - ENDPOINT
+# -------------------------
+@app.post("/transmission")
+def transmission(inp: TxInput):
+    freq_GHz, Tlin = _run_transmission(
+        epsilon=inp.epsilon,
+        r_over_a=inp.r_over_a,
+        a_mm=inp.a_mm,
+        nx=inp.nx,
+        ny=inp.ny,
+        lattice=inp.lattice,
+        fmin_GHz=inp.fmin_GHz,
+        fmax_GHz=inp.fmax_GHz,
+        nfreq=inp.nfreq,
+        resolution=inp.resolution,
+        y_boundary=inp.y_boundary,
+    )
+    # numeric safety + dB conversion
+    Tlin = np.clip(Tlin, 1e-12, None)
+    TdB  = 10.0 * np.log10(Tlin)
+
+    # return with BOTH legacy and new keys so any UI version works
+    return {
+        "freq_GHz": freq_GHz.tolist(),
+        "trans_dB": TdB.tolist(),
+        "frequency_GHz": freq_GHz.tolist(),
+        "transmission_dB": TdB.tolist(),
+    }
 
     # --- numerics: thicker PML + more air padding improves deep stop-bands ---
     dpml    = 2.0          # was 1.0
@@ -229,7 +258,7 @@ def _run_transmission(
                             resolution=resolution,
                             k_point=k_point)
     tran0 = sim_ref.add_flux(fcen, fwidth, nfreq, tran_fr)
-    sim_ref.run(until_after_sources=mp.stop_when_fields_decayed(50, mp.Ez, tran_fr.center, 1e-7))
+    sim_ref.run(until_after_sources=mp.stop_when_fields_decayed(120, mp.Ez, tran_fr.center, 1e-9))
     tran0_spec = np.array(mp.get_fluxes(tran0))
     # save spectral phase/amplitude of the incident wave
     ref_data = sim_ref.get_flux_data(tran0)
