@@ -94,6 +94,14 @@ with colB:
     nx = st.slider("Rods along x", 4, 40, 10, 1, key="tx_nx")
     ny = st.slider("Rods along y", 4, 40, 8, 1, key="tx_ny")
     lattice_tx = st.selectbox("Lattice", ["square", "triangular"], index=0, key="tx_lattice")
+# New dropdown for boundary condition
+y_bound = st.selectbox(
+    "Y boundary",
+    ["periodic", "pml"],
+    index=0,
+    help="periodic = infinite height (2D, like HFSS); pml = finite-height slab with absorption",
+    key="tx_ybound"
+)
 
 colC, colD, colE = st.columns(3)
 with colC:
@@ -125,6 +133,7 @@ with col_tx_btn:
                 "fmin_GHz": float(fmin),
                 "fmax_GHz": float(fmax),
                 "nfreq": int(nfreq),
+             "y_boundary": y_bound, 
             }
             try:
                 with st.spinner("Running Meep (this can take ~10–60s)…"):
