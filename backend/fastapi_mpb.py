@@ -38,7 +38,7 @@ def _GHz_to_meep(f_GHz: float, a_m: float) -> float:
     return (a_m * (f_GHz * 1e9)) / C0
 
 def _build_rods_grid(r_over_a: float, eps: float, nx: int, ny: int, lattice: str):
-    """Return (geometry, height_in_a) for a rods-in-air slab. a=1 units."""
+    """Return (geometry, height_in_a) for a centered rods-in-air slab. a=1 units."""
     r = r_over_a * 0.5
     rods = []
     if lattice == "triangular":
@@ -48,22 +48,26 @@ def _build_rods_grid(r_over_a: float, eps: float, nx: int, ny: int, lattice: str
         for ix in range(nx):
             for iy in range(ny):
                 for b in basis:
+                    cx = ix + b.x - 0.5*nx + 0.5
+                    cy = iy*dy + b.y - 0.5*height + dy/2
                     rods.append(
                         mp.Cylinder(
                             radius=r, height=mp.inf,
                             material=mp.Medium(epsilon=eps),
-                            center=mp.Vector3(ix + b.x, iy*dy + b.y)
+                            center=mp.Vector3(cx, cy)
                         )
                     )
-    else:
+    else:  # square
         height = ny
         for ix in range(nx):
             for iy in range(ny):
+                cx = ix - 0.5*nx + 0.5
+                cy = iy - 0.5*ny + 0.5
                 rods.append(
                     mp.Cylinder(
                         radius=r, height=mp.inf,
                         material=mp.Medium(epsilon=eps),
-                        center=mp.Vector3(ix, iy)
+                        center=mp.Vector3(cx, cy)
                     )
                 )
     return rods, height
@@ -144,22 +148,24 @@ def _run_transmission(
     fcen = 0.5 * (fmin_mu + fmax_mu)
     fwidth = (fmax_mu - fmin_mu)
 
-    # Geometry in a-units (a=1)
-    rods, height = _build_rods_grid(r_over_a, epsilon, nx, ny, lattice)
+# Geometry in a-units (a=1)
+rods, height = _build_rods_grid(inp.r_over_a, inp.epsilon, inp.nx, inp.ny, inp.lattice)
 
-    # Cell & source
-    dpml = 1.0
-    sx = nx + 2*dpml + 2.0
-    sy = max(6.0, height + 2*dpml)
-    cell = mp.Vector3(sx, sy, 0)
-    src_x = -0.5*sx + dpml + 0.5
-    src = [mp.Source(src=mp.GaussianSource(frequency=fcen, fwidth=fwidth),
-                     component=mp.Ez,
-                     center=mp.Vector3(src_x, 0),
-                     size=mp.Vector3(0, sy - 2*dpml))]
+# Cell & source
+dpml = 1.0
+sx = inp.nx + 2*dpml + 2.0                 # 1 a in front and 1 a behind
+sy = height + 2*dpml                       # just fits the slab vertically
+cell = mp.Vector3(sx, sy, 0)
 
-    tran_fr = mp.FluxRegion(center=mp.Vector3(0.5*sx - dpml - 0.5, 0),
-                            size=mp.Vector3(0, sy - 2*dpml))
+src_x = -0.5*sx + dpml + 0.5
+src = [mp.Source(src=mp.GaussianSource(frequency=fcen, fwidth=fwidth),
+                 component=mp.Ez,
+                 center=mp.Vector3(src_x, 0),
+                 size=mp.Vector3(0, sy - 2*dpml))]
+
+tran_fr = mp.FluxRegion(center=mp.Vector3(0.5*sx - dpml - 0.5, 0),
+                        size=mp.Vector3(0, sy - 2*dpml))
+
 
     # With crystal
     sim = mp.Simulation(cell_size=cell, geometry=rods,
