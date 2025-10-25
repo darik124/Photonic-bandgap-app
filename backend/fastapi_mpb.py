@@ -37,40 +37,70 @@ def _GHz_to_meep(f_GHz: float, a_m: float) -> float:
     """Dimensionless frequency f = a/λ for Meep/MPB (2πc factors handled by Meep)."""
     return (a_m * (f_GHz * 1e9)) / C0
 
-def _build_rods_grid(r_over_a: float, eps: float, nx: int, ny: int, lattice: str):
-    """Return (geometry, height_in_a) for a centered rods-in-air slab. a=1 units."""
+def _build_rods_grid(r_over_a: float, eps: float, nx: int, ny: int, lattice: str,
+                     periodic_y: bool = False):
+    """
+    Return (geometry, height_in_a, y_period_in_a) in a=1 units.
+
+    periodic_y = True  -> build a single Y period only (k=0 Bloch), ignoring 'ny'
+    periodic_y = False -> build ny rows (finite-height slab)
+    """
     r = r_over_a * 0.5
     rods = []
+
     if lattice == "triangular":
-        dy = np.sqrt(3) / 2
-        height = dy * ny
-        basis = [mp.Vector3(0, 0), mp.Vector3(0.5, dy)]
-        for ix in range(nx):
-            for iy in range(ny):
-                for b in basis:
-                    cx = ix + b.x - 0.5*nx + 0.5
-                    cy = iy*dy + b.y - 0.5*height + dy/2
-                    rods.append(
-                        mp.Cylinder(
-                            radius=r, height=mp.inf,
-                            material=mp.Medium(epsilon=eps),
-                            center=mp.Vector3(cx, cy)
-                        )
-                    )
-    else:  # square
-        height = ny
-        for ix in range(nx):
-            for iy in range(ny):
+        dy = np.sqrt(3) / 2  # y period
+        if periodic_y:
+            # One unit cell in Y: two basis rods per layer
+            height = dy
+            for ix in range(nx):
                 cx = ix - 0.5*nx + 0.5
-                cy = iy - 0.5*ny + 0.5
-                rods.append(
-                    mp.Cylinder(
-                        radius=r, height=mp.inf,
-                        material=mp.Medium(epsilon=eps),
-                        center=mp.Vector3(cx, cy)
-                    )
-                )
-    return rods, height
+                # basis at y = ±dy/2 centered around 0
+                rods.append(mp.Cylinder(radius=r, height=mp.inf,
+                                        material=mp.Medium(epsilon=eps),
+                                        center=mp.Vector3(cx + 0.0, +0.5*dy)))
+                rods.append(mp.Cylinder(radius=r, height=mp.inf,
+                                        material=mp.Medium(epsilon=eps),
+                                        center=mp.Vector3(cx + 0.5, -0.0*dy)))  # (0.5,0) in conventional basis
+        else:
+            # Finite-height: ny rows, two basis rods per row
+            height = dy * ny
+            for ix in range(nx):
+                for iy in range(ny):
+                    cx = ix - 0.5*nx + 0.5
+                    cy0 = (iy + 0.5) * dy - 0.5*height
+                    rods.append(mp.Cylinder(radius=r, height=mp.inf,
+                                            material=mp.Medium(epsilon=eps),
+                                            center=mp.Vector3(cx + 0.0, cy0 + 0.5*dy)))
+                    rods.append(mp.Cylinder(radius=r, height=mp.inf,
+                                            material=mp.Medium(epsilon=eps),
+                                            center=mp.Vector3(cx + 0.5, cy0 + 0.0)))
+        yperiod = dy
+
+    else:  # square
+        dy = 1.0  # y period
+        if periodic_y:
+            # One unit cell in Y: a single rod per layer at y=0
+            height = dy
+            for ix in range(nx):
+                cx = ix - 0.5*nx + 0.5
+                rods.append(mp.Cylinder(radius=r, height=mp.inf,
+                                        material=mp.Medium(epsilon=eps),
+                                        center=mp.Vector3(cx, 0.0)))
+        else:
+            # Finite-height: ny rows
+            height = ny
+            for ix in range(nx):
+                for iy in range(ny):
+                    cx = ix - 0.5*nx + 0.5
+                    cy = iy - 0.5*ny + 0.5
+                    rods.append(mp.Cylinder(radius=r, height=mp.inf,
+                                            material=mp.Medium(epsilon=eps),
+                                            center=mp.Vector3(cx, cy)))
+        yperiod = dy
+
+    return rods, height, yperiod
+
 
 # ==========================================================
 # 1) Infinite crystal (MPB band structure)
@@ -134,7 +164,7 @@ class TxInput(BaseModel):
     fmin_GHz: float = 5.0
     fmax_GHz: float = 35.0
     nfreq: int = 300
-    y_boundary: str = "periodic"   # "periodic" (2D / infinite height) or "pml" (finite slab)
+    y_boundary: str = "periodic"   # "periodic" = 2D/infinite height (one Y period), "pml" = finite-Height
 
 def _run_transmission(
     *, epsilon: float, r_over_a: float, a_mm: float,
@@ -142,79 +172,65 @@ def _run_transmission(
     fmin_GHz: float, fmax_GHz: float, nfreq: int,
     resolution: int, y_boundary: str = "periodic"
 ):
-    """Compute power transmittance T(f) for a finite slab, normalized to no-crystal."""
-    # ---- frequency setup (Meep units) ----
     a_m = _a_from_mm(a_mm)
     fmin_mu = _GHz_to_meep(fmin_GHz, a_m)
     fmax_mu = _GHz_to_meep(fmax_GHz, a_m)
     fcen    = 0.5 * (fmin_mu + fmax_mu)
     fwidth  = (fmax_mu - fmin_mu)
 
-    # ---- geometry (a = 1 units) ----
-    rods, height = _build_rods_grid(r_over_a, epsilon, nx, ny, lattice)
+    periodic_y = (y_boundary or "periodic").lower() == "periodic"
+    rods, height, yperiod = _build_rods_grid(
+        r_over_a, epsilon, nx, ny, lattice, periodic_y=periodic_y
+    )
 
-    # ---- cell & boundaries ----
-    dpml = 1.0           # PML thickness (in 'a' units)
-    air_pad = 1.0        # extra air before/after crystal along x (each side)
+    dpml     = 1.0
+    air_pad  = 1.0
     sx = nx + 2*dpml + 2*air_pad
 
-    yb = (y_boundary or "periodic").lower()
-    if yb == "periodic":
-        # 2D / infinite height (Bloch k=0). No PML in Y.
-        sy   = height
+    if periodic_y:
+        # true 2D: one Y period, PML only in X
+        sy   = yperiod
         cell = mp.Vector3(sx, sy, 0)
         bnd  = [mp.PML(dpml, direction=mp.X)]
-        src_size_y  = sy
-        flux_size_y = sy
+        src_h = sy
+        flx_h = sy
     else:
-        # finite-height slab with PML top/bottom
+        # finite-height: ny periods + PML top/bottom
         sy   = height + 2*dpml
         cell = mp.Vector3(sx, sy, 0)
-        bnd  = [mp.PML(dpml)]   # PML in all directions
-        src_size_y  = sy - 2*dpml
-        flux_size_y = sy - 2*dpml
+        bnd  = [mp.PML(dpml)]  # all sides
+        src_h = sy - 2*dpml
+        flx_h = sy - 2*dpml
 
-    # ---- source & monitors ----
     src_x   = -0.5*sx + dpml + 0.5*air_pad
     probe_x = +0.5*sx - dpml - 0.5*air_pad
 
     src = [mp.Source(
-        src=mp.GaussianSource(frequency=fcen, fwidth=fwidth),
+        mp.GaussianSource(frequency=fcen, fwidth=fwidth),
         component=mp.Ez,
-        center=mp.Vector3(src_x, 0),
-        size=mp.Vector3(0, src_size_y),
+        center=mp.Vector3(src_x, 0.0),
+        size=mp.Vector3(0, src_h),
     )]
 
-    tran_fr = mp.FluxRegion(center=mp.Vector3(probe_x, 0),
-                            size=mp.Vector3(0, flux_size_y))
+    tran_fr = mp.FluxRegion(center=mp.Vector3(probe_x, 0.0),
+                            size=mp.Vector3(0, flx_h))
 
-    # ---- with crystal ----
+    # with crystal
     sim = mp.Simulation(cell_size=cell, geometry=rods,
                         boundary_layers=bnd, sources=src,
                         resolution=resolution)
     tran = sim.add_flux(fcen, fwidth, nfreq, tran_fr)
-
-    # run until the Gaussian source is off and energy at probe decays
-    sim.run(
-        until_after_sources=mp.stop_when_fields_decayed(
-            50, mp.Ez, tran_fr.center, 1e-6
-        )
-    )
+    sim.run(until_after_sources=mp.stop_when_fields_decayed(50, mp.Ez, tran_fr.center, 1e-6))
     tran_spec = np.array(mp.get_fluxes(tran))
 
-    # ---- reference (no crystal) ----
+    # reference (no crystal)
     sim.reset_meep()
     sim = mp.Simulation(cell_size=cell, boundary_layers=bnd,
                         sources=src, resolution=resolution)
     tran0 = sim.add_flux(fcen, fwidth, nfreq, tran_fr)
-    sim.run(
-        until_after_sources=mp.stop_when_fields_decayed(
-            50, mp.Ez, tran_fr.center, 1e-6
-        )
-    )
+    sim.run(until_after_sources=mp.stop_when_fields_decayed(50, mp.Ez, tran_fr.center, 1e-6))
     tran0_spec = np.array(mp.get_fluxes(tran0))
 
-    # ---- ratio & GHZ axis for plotting ----
     Tlin = tran_spec / (tran0_spec + 1e-12)
     freq_GHz = np.linspace(fmin_GHz, fmax_GHz, nfreq)
     return freq_GHz, Tlin
@@ -231,6 +247,7 @@ def transmission(inp: TxInput):
     return {"freq_GHz": freq_GHz.tolist(),
             "trans_dB": Tdb.tolist(),
             "trans_lin": Tlin.tolist()}
+
 
 # ==========================================================
 # 3) Attenuation in forbidden band (Transmission vs layers)
