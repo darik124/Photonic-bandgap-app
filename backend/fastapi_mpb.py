@@ -120,9 +120,9 @@ def compute_bands(inp: BandInput):
     freqs = np.asarray(ms.all_freqs).tolist()  # (num_k, num_bands)
     return {"k_path_labels": labels, "frequencies": freqs}
 
-# ==========================================================
+# -------------------------
 # 2) Finite crystal (Meep transmission spectrum)
-# ==========================================================
+# -------------------------
 class TxInput(BaseModel):
     epsilon: float
     r_over_a: float
@@ -134,69 +134,88 @@ class TxInput(BaseModel):
     fmin_GHz: float = 5.0
     fmax_GHz: float = 35.0
     nfreq: int = 300
-    y_boundary: str = "periodic"   # "periodic" (infinite height) or "pml" (finite slab)
+    y_boundary: str = "periodic"   # "periodic" (2D / infinite height) or "pml" (finite slab)
 
 def _run_transmission(
     *, epsilon: float, r_over_a: float, a_mm: float,
     nx: int, ny: int, lattice: str,
     fmin_GHz: float, fmax_GHz: float, nfreq: int,
-    resolution: int
+    resolution: int, y_boundary: str = "periodic"
 ):
     """Compute power transmittance T(f) for a finite slab, normalized to no-crystal."""
+    # ---- frequency setup (Meep units) ----
     a_m = _a_from_mm(a_mm)
     fmin_mu = _GHz_to_meep(fmin_GHz, a_m)
     fmax_mu = _GHz_to_meep(fmax_GHz, a_m)
-    fcen = 0.5 * (fmin_mu + fmax_mu)
-    fwidth = (fmax_mu - fmin_mu)
+    fcen    = 0.5 * (fmin_mu + fmax_mu)
+    fwidth  = (fmax_mu - fmin_mu)
 
-# Geometry in a-units (a=1)
-rods, height = _build_rods_grid(r_over_a, epsilon, nx, ny, lattice)
+    # ---- geometry (a = 1 units) ----
+    rods, height = _build_rods_grid(r_over_a, epsilon, nx, ny, lattice)
 
-dpml = 1.0
-sx = nx + 2*dpml + 2.0
+    # ---- cell & boundaries ----
+    dpml = 1.0           # PML thickness (in 'a' units)
+    air_pad = 1.0        # extra air before/after crystal along x (each side)
+    sx = nx + 2*dpml + 2*air_pad
 
-if y_boundary.lower() == "periodic":
-    # infinite-height (2D) case
-    sy = height
-    cell = mp.Vector3(sx, sy, 0)
-    bnd = [mp.PML(dpml, direction=mp.X)]
-    src_size_y = sy
-    tran_size_y = sy
-else:
-    # finite-height slab with PML above/below
-    sy = height + 2*dpml
-    cell = mp.Vector3(sx, sy, 0)
-    bnd = [mp.PML(dpml)]  # PML in all directions
-    src_size_y = sy - 2*dpml
-    tran_size_y = sy - 2*dpml
+    yb = (y_boundary or "periodic").lower()
+    if yb == "periodic":
+        # 2D / infinite height (Bloch k=0). No PML in Y.
+        sy   = height
+        cell = mp.Vector3(sx, sy, 0)
+        bnd  = [mp.PML(dpml, direction=mp.X)]
+        src_size_y  = sy
+        flux_size_y = sy
+    else:
+        # finite-height slab with PML top/bottom
+        sy   = height + 2*dpml
+        cell = mp.Vector3(sx, sy, 0)
+        bnd  = [mp.PML(dpml)]   # PML in all directions
+        src_size_y  = sy - 2*dpml
+        flux_size_y = sy - 2*dpml
 
-src_x = -0.5*sx + dpml + 0.5
-src = [mp.Source(src=mp.GaussianSource(frequency=fcen, fwidth=fwidth),
-                 component=mp.Ez,
-                 center=mp.Vector3(src_x, 0),
-                 size=mp.Vector3(0, src_size_y))]
+    # ---- source & monitors ----
+    src_x   = -0.5*sx + dpml + 0.5*air_pad
+    probe_x = +0.5*sx - dpml - 0.5*air_pad
 
-tran_fr = mp.FluxRegion(center=mp.Vector3(0.5*sx - dpml - 0.5, 0),
-                        size=mp.Vector3(0, tran_size_y))
+    src = [mp.Source(
+        src=mp.GaussianSource(frequency=fcen, fwidth=fwidth),
+        component=mp.Ez,
+        center=mp.Vector3(src_x, 0),
+        size=mp.Vector3(0, src_size_y),
+    )]
 
-# With crystal
-sim = mp.Simulation(cell_size=cell, geometry=rods,
-                    boundary_layers=bnd, sources=src,
-                    resolution=resolution)
-tran = sim.add_flux(fcen, fwidth, nfreq, tran_fr)
-sim.run(until=mp.stop_when_fields_decayed(50, mp.Ez, tran_fr.center, 1e-6))
-tran_spec = np.array(mp.get_fluxes(tran))
+    tran_fr = mp.FluxRegion(center=mp.Vector3(probe_x, 0),
+                            size=mp.Vector3(0, flux_size_y))
 
-# Reference (no crystal)
-sim.reset_meep()
-sim = mp.Simulation(cell_size=cell, boundary_layers=bnd,
-                    sources=src, resolution=resolution)
-tran0 = sim.add_flux(fcen, fwidth, nfreq, tran_fr)
-sim.run(until=mp.stop_when_fields_decayed(50, mp.Ez, tran_fr.center, 1e-6))
-tran0_spec = np.array(mp.get_fluxes(tran0))
+    # ---- with crystal ----
+    sim = mp.Simulation(cell_size=cell, geometry=rods,
+                        boundary_layers=bnd, sources=src,
+                        resolution=resolution)
+    tran = sim.add_flux(fcen, fwidth, nfreq, tran_fr)
 
+    # run until the Gaussian source is off and energy at probe decays
+    sim.run(
+        until_after_sources=mp.stop_when_fields_decayed(
+            50, mp.Ez, tran_fr.center, 1e-6
+        )
+    )
+    tran_spec = np.array(mp.get_fluxes(tran))
 
-    Tlin = tran_spec / (tran0_spec + 1e-12)  # power transmittance
+    # ---- reference (no crystal) ----
+    sim.reset_meep()
+    sim = mp.Simulation(cell_size=cell, boundary_layers=bnd,
+                        sources=src, resolution=resolution)
+    tran0 = sim.add_flux(fcen, fwidth, nfreq, tran_fr)
+    sim.run(
+        until_after_sources=mp.stop_when_fields_decayed(
+            50, mp.Ez, tran_fr.center, 1e-6
+        )
+    )
+    tran0_spec = np.array(mp.get_fluxes(tran0))
+
+    # ---- ratio & GHZ axis for plotting ----
+    Tlin = tran_spec / (tran0_spec + 1e-12)
     freq_GHz = np.linspace(fmin_GHz, fmax_GHz, nfreq)
     return freq_GHz, Tlin
 
@@ -206,14 +225,12 @@ def transmission(inp: TxInput):
         epsilon=inp.epsilon, r_over_a=inp.r_over_a, a_mm=inp.a_mm,
         nx=inp.nx, ny=inp.ny, lattice=inp.lattice,
         fmin_GHz=inp.fmin_GHz, fmax_GHz=inp.fmax_GHz, nfreq=inp.nfreq,
-        resolution=inp.resolution,
+        resolution=inp.resolution, y_boundary=inp.y_boundary,
     )
     Tdb = 10.0*np.log10(np.clip(Tlin, 1e-12, None))
-    return {
-        "freq_GHz": freq_GHz.tolist(),
-        "trans_dB": Tdb.tolist(),
-        "trans_lin": Tlin.tolist()
-    }
+    return {"freq_GHz": freq_GHz.tolist(),
+            "trans_dB": Tdb.tolist(),
+            "trans_lin": Tlin.tolist()}
 
 # ==========================================================
 # 3) Attenuation in forbidden band (Transmission vs layers)
