@@ -1,5 +1,6 @@
 import streamlit as st
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 import requests
 
@@ -18,6 +19,7 @@ BACKEND_URL = st.secrets.get("BACKEND_URL", "").rstrip("/")
 API_BANDS = f"{BACKEND_URL}/bands" if BACKEND_URL else None
 API_TX    = f"{BACKEND_URL}/transmission" if BACKEND_URL else None
 API_ATT   = f"{BACKEND_URL}/attenuation" if BACKEND_URL else None
+API_CAL   = f"{BACKEND_URL}/calibrate" if BACKEND_URL else None
 
 st.set_page_config(page_title="Photonic Band Gap Visualizer", layout="centered")
 st.title("Photonic Band Gap Visualizer (MPB-backed)")
@@ -27,7 +29,7 @@ if not backend_ok(BACKEND_URL):
     st.info("Backend not reachable yet. Start the Docker backend, then try again.")
 
 # Ensure session slots exist so plots persist across reruns
-for k in ("bands_data", "tx_data", "att_data"):
+for k in ("bands_data", "tx_data", "att_data", "calib_overlay"):
     st.session_state.setdefault(k, None)
 
 # =========================================================
@@ -76,7 +78,7 @@ if st.session_state["bands_data"]:
     ax.set_xticklabels(data["k_path_labels"])
     ax.set_ylabel("Normalized frequency (ωa/2πc)")
     ax.set_title("Band Structure (MPB)")
-    ax.grid(True)
+    ax.grid(True, alpha=0.3)
     st.pyplot(fig)
 
 st.markdown("---")
@@ -91,8 +93,8 @@ with colA:
     a_mm      = st.slider("Lattice constant a (mm)", 3.0, 15.0, 7.0, 0.1, key="tx_a_mm")
     r_over_a2 = st.slider("Rod radius ratio r/a", 0.02, 0.40, 0.16, 0.01, key="tx_r_over_a")
 with colB:
-    nx = st.slider("Rods along x", 4, 20, 10, 1, key="tx_nx")
-    ny = st.slider("Rods along y", 4, 20, 8, 1, key="tx_ny")
+    nx = st.slider("Rods along x", 4, 40, 10, 1, key="tx_nx")
+    ny = st.slider("Rods along y", 4, 40, 8, 1, key="tx_ny")
     lattice_tx = st.selectbox("Lattice", ["square", "triangular"], index=0, key="tx_lattice")
 
 colC, colD, colE = st.columns(3)
@@ -101,10 +103,10 @@ with colC:
 with colD:
     fmax = st.number_input("fmax (GHz)", 1.0, 60.0, 35.0, 0.5, key="tx_fmax")
 with colE:
-    nfreq = st.slider("Points", 50, 600, 300, 10, key="tx_nfreq")
+    nfreq = st.slider("Points", 50, 1000, 300, 10, key="tx_nfreq")
 
 res_tx = st.slider(
-    "Resolution (px per a)", 8, 64, 24, 1,
+    "Resolution (px per a)", 8, 96, 24, 1,
     help="Higher = more accurate but slower", key="tx_res"
 )
 
@@ -138,12 +140,85 @@ with col_tx_btn:
 if st.session_state["tx_data"]:
     data = st.session_state["tx_data"]
     fig, ax = plt.subplots()
-    ax.plot(data["frequency_GHz"], data["transmission_dB"])
+    # backend returns freq_GHz + trans_dB
+    ax.plot(data["freq_GHz"], data["trans_dB"], lw=1.5, label="Simulation (Meep)")
     ax.set_xlabel("Frequency (GHz)")
     ax.set_ylabel("Transmission (dB)")
     ax.set_title("Transmission Diagram (finite slab)")
-    ax.grid(True)
+    ax.grid(True, linestyle="--", alpha=0.4)
+
+    # If a calibration overlay exists, draw it
+    if st.session_state["calib_overlay"] is not None:
+        ov = st.session_state["calib_overlay"]
+        if "ref_df" in ov:
+            ax.plot(ov["ref_df"]["freq_GHz"], ov["ref_df"]["trans_dB"], alpha=0.8, label="Reference (experimental)")
+        if "sim_df" in ov:
+            ax.plot(ov["sim_df"]["freq_GHz"], ov["sim_df"]["sim_dB"], alpha=0.9, label="Best-fit (Meep)")
+        ax.legend()
+
     st.pyplot(fig)
+
+# =========================================================
+# 2b) Calibration to reference dataset (new)
+# =========================================================
+st.subheader("Match to reference (experimental)")
+
+uploaded = st.file_uploader("Upload CSV with columns: freq_GHz, trans_dB", type=["csv"])
+if uploaded is not None:
+    df_ref = pd.read_csv(uploaded)
+    # sanitize
+    df_ref = df_ref.dropna()[["freq_GHz", "trans_dB"]].sort_values("freq_GHz")
+    st.caption(f"Loaded {len(df_ref)} reference points.")
+    st.line_chart(df_ref.set_index("freq_GHz"))
+
+    with st.expander("Calibration search settings", expanded=False):
+        a_min = st.number_input("a_min (mm)", value=7.0)
+        a_max = st.number_input("a_max (mm)", value=12.0)
+        a_steps = st.number_input("a_steps", value=11, step=1)
+        nx_min = st.number_input("nx_min", value=8, step=1)
+        nx_max = st.number_input("nx_max", value=28, step=1)
+        nx_step = st.number_input("nx_step", value=4, step=1)
+        calib_res = st.number_input("calibration resolution (px per a)", value=28, step=2)
+        pts = st.number_input("points per sweep", value=400, step=100)
+        ny_cal = st.number_input("ny (rods along y)", value=8, step=1)
+
+    do_cal = st.button("Calibrate to dataset")
+    if do_cal:
+        if not API_CAL:
+            st.warning("Set BACKEND_URL in secrets (e.g., http://localhost:8000).")
+        else:
+            payload = {
+                "epsilon": float(eps_tx),
+                "r_over_a": float(r_over_a2),
+                "lattice": lattice_tx,
+                "ny": int(ny_cal),
+                "a_min_mm": float(a_min),
+                "a_max_mm": float(a_max),
+                "a_steps": int(a_steps),
+                "nx_min": int(nx_min),
+                "nx_max": int(nx_max),
+                "nx_step": int(nx_step),
+                "calib_resolution": int(calib_res),
+                "points": int(pts),
+                "reference": df_ref.to_dict(orient="records"),
+            }
+            try:
+                with st.spinner("Searching best a, nx to fit reference…"):
+                    r = requests.post(API_CAL, json=payload, timeout=1200)
+                    r.raise_for_status()
+                    res = r.json()
+                    st.success(f"Best fit: a = {res['a_mm']:.2f} mm, nx = {res['nx']}  (MSE = {res['mse']:.4f})")
+
+                    # overlay storage for the main plot
+                    sim_df = pd.DataFrame({"freq_GHz": res["freq_GHz"], "sim_dB": res["sim_dB"]})
+                    st.session_state["calib_overlay"] = {"ref_df": df_ref, "sim_df": sim_df}
+
+                    # optionally push into the sliders for a one-click re-run at high res
+                    st.session_state["tx_a_mm"] = float(res["a_mm"])
+                    st.session_state["tx_nx"] = int(res["nx"])
+
+            except Exception as e:
+                st.error(f"Calibration error: {e}")
 
 st.markdown("---")
 st.header("Attenuation in Forbidden Band (Transmission vs Layers)")
@@ -161,13 +236,13 @@ with col3:
 
 col4, col5, col6 = st.columns(3)
 with col4:
-    att_ny = st.slider("Rods along y", 2, 30, 8, 1, key="att_ny")
+    att_ny = st.slider("Rods along y", 2, 60, 8, 1, key="att_ny")
 with col5:
-    att_nmax = st.slider("Max layers along x", 1, 30, 10, 1, key="att_nmax")
+    att_nmax = st.slider("Max layers along x", 1, 60, 10, 1, key="att_nmax")
 with col6:
     att_f0 = st.number_input("Probe frequency f0 (GHz)", 0.1, 100.0, 15.0, 0.1, key="att_f0")
 
-att_res = st.slider("Resolution (px per a)", 8, 64, 24, 1, key="att_res")
+att_res = st.slider("Resolution (px per a)", 8, 96, 24, 1, key="att_res")
 att_lat = st.selectbox("Lattice", ["square", "triangular"], index=0, key="att_lat")
 
 col_att_btn = st.columns([1,3])[0]
