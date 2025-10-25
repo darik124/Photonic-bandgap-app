@@ -172,19 +172,22 @@ def _run_transmission(
     fmin_GHz: float, fmax_GHz: float, nfreq: int,
     resolution: int, y_boundary: str = "periodic"
 ):
+    # --- frequency setup (Meep units) ---
     a_m = _a_from_mm(a_mm)
     fmin_mu = _GHz_to_meep(fmin_GHz, a_m)
     fmax_mu = _GHz_to_meep(fmax_GHz, a_m)
     fcen    = 0.5 * (fmin_mu + fmax_mu)
     fwidth  = (fmax_mu - fmin_mu)
 
+    # --- build geometry ---
     periodic_y = (y_boundary or "periodic").lower() == "periodic"
     rods, height, yperiod = _build_rods_grid(
         r_over_a, epsilon, nx, ny, lattice, periodic_y=periodic_y
     )
 
-    dpml     = 1.0
-    air_pad  = 1.0
+    # --- numerics: thicker PML + more air padding improves deep stop-bands ---
+    dpml    = 2.0          # was 1.0
+    air_pad = 2.0          # was 1.0
     sx = nx + 2*dpml + 2*air_pad
 
     if periodic_y:
@@ -194,59 +197,64 @@ def _run_transmission(
         bnd  = [mp.PML(dpml, direction=mp.X)]
         src_h = sy
         flx_h = sy
+        k_point = mp.Vector3(0, 0, 0)  # Bloch k=0 (explicit)
     else:
         # finite-height: ny periods + PML top/bottom
         sy   = height + 2*dpml
         cell = mp.Vector3(sx, sy, 0)
-        bnd  = [mp.PML(dpml)]  # all sides
+        bnd  = [mp.PML(dpml)]
         src_h = sy - 2*dpml
         flx_h = sy - 2*dpml
+        k_point = mp.Vector3(0, 0, 0)
 
-    src_x   = -0.5*sx + dpml + 0.5*air_pad
-    probe_x = +0.5*sx - dpml - 0.5*air_pad
+    # place source and probe away from PML and structure
+    src_x   = -0.5*sx + dpml + 0.75*air_pad
+    probe_x = +0.5*sx - dpml - 0.75*air_pad
 
     src = [mp.Source(
-        mp.GaussianSource(frequency=fcen, fwidth=fwidth),
+        src=mp.GaussianSource(frequency=fcen, fwidth=fwidth),
         component=mp.Ez,
-        center=mp.Vector3(src_x, 0.0),
+        center=mp.Vector3(src_x, 0),
         size=mp.Vector3(0, src_h),
     )]
-
-    tran_fr = mp.FluxRegion(center=mp.Vector3(probe_x, 0.0),
+    tran_fr = mp.FluxRegion(center=mp.Vector3(probe_x, 0),
                             size=mp.Vector3(0, flx_h))
 
-    # with crystal
-    sim = mp.Simulation(cell_size=cell, geometry=rods,
-                        boundary_layers=bnd, sources=src,
-                        resolution=resolution)
+    # ----------------------------
+    # Reference FIRST (no crystal)
+    # ----------------------------
+    sim_ref = mp.Simulation(cell_size=cell,
+                            boundary_layers=bnd,
+                            sources=src,
+                            resolution=resolution,
+                            k_point=k_point)
+    tran0 = sim_ref.add_flux(fcen, fwidth, nfreq, tran_fr)
+    sim_ref.run(until_after_sources=mp.stop_when_fields_decayed(50, mp.Ez, tran_fr.center, 1e-7))
+    tran0_spec = np.array(mp.get_fluxes(tran0))
+    # save spectral phase/amplitude of the incident wave
+    ref_data = sim_ref.get_flux_data(tran0)
+
+    # --------------------------------------
+    # With crystal, using minus-flux loading
+    # --------------------------------------
+    sim = mp.Simulation(cell_size=cell,
+                        geometry=rods,
+                        boundary_layers=bnd,
+                        sources=src,
+                        resolution=resolution,
+                        k_point=k_point)
     tran = sim.add_flux(fcen, fwidth, nfreq, tran_fr)
-    sim.run(until_after_sources=mp.stop_when_fields_decayed(50, mp.Ez, tran_fr.center, 1e-6))
+    # subtract the incident field so transmitted power is accurate in stop-bands
+    sim.load_minus_flux_data(tran, ref_data)
+
+    sim.run(until_after_sources=mp.stop_when_fields_decayed(80, mp.Ez, tran_fr.center, 1e-7))
     tran_spec = np.array(mp.get_fluxes(tran))
 
-    # reference (no crystal)
-    sim.reset_meep()
-    sim = mp.Simulation(cell_size=cell, boundary_layers=bnd,
-                        sources=src, resolution=resolution)
-    tran0 = sim.add_flux(fcen, fwidth, nfreq, tran_fr)
-    sim.run(until_after_sources=mp.stop_when_fields_decayed(50, mp.Ez, tran_fr.center, 1e-6))
-    tran0_spec = np.array(mp.get_fluxes(tran0))
-
-    Tlin = tran_spec / (tran0_spec + 1e-12)
+    # ratio (already incident-subtracted on numerator): still divide by |inc| for absolute T
+    Tlin = tran_spec / (tran0_spec + 1e-18)
     freq_GHz = np.linspace(fmin_GHz, fmax_GHz, nfreq)
     return freq_GHz, Tlin
 
-@app.post("/transmission")
-def transmission(inp: TxInput):
-    freq_GHz, Tlin = _run_transmission(
-        epsilon=inp.epsilon, r_over_a=inp.r_over_a, a_mm=inp.a_mm,
-        nx=inp.nx, ny=inp.ny, lattice=inp.lattice,
-        fmin_GHz=inp.fmin_GHz, fmax_GHz=inp.fmax_GHz, nfreq=inp.nfreq,
-        resolution=inp.resolution, y_boundary=inp.y_boundary,
-    )
-    Tdb = 10.0*np.log10(np.clip(Tlin, 1e-12, None))
-    return {"freq_GHz": freq_GHz.tolist(),
-            "trans_dB": Tdb.tolist(),
-            "trans_lin": Tlin.tolist()}
 
 
 # ==========================================================
