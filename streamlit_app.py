@@ -91,7 +91,7 @@ with colA:
     a_mm      = st.slider("Lattice constant a (mm)", 3.0, 15.0, 7.0, 0.1, key="tx_a_mm")
     r_over_a2 = st.slider("Rod radius ratio r/a", 0.02, 0.40, 0.16, 0.01, key="tx_r_over_a")
 with colB:
-    nx = st.slider("Rods along x", 4, 40, 10, 1, key="tx_nx")
+    nx = st.slider("Rods along x", 4, 80, 10, 1, key="tx_nx")
     ny = st.slider("Rods along y", 4, 40, 8, 1, key="tx_ny")
     lattice_tx = st.selectbox("Lattice", ["square", "triangular"], index=0, key="tx_lattice")
 # New dropdown for boundary condition
